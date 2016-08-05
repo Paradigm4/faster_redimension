@@ -107,7 +107,7 @@ private:
             for(size_t j =0; j<_numOutputAttrs && !found; ++j)
             {
                 AttributeDesc const& outputAttr = _outputSchema.getAttributes(true)[j];
-                if (inputAttr.getName() == inputAttr.getName())
+                if (inputAttr.getName() == outputAttr.getName())
                 {
                     _mapToTuple[i] = j + 1 + _numOutputDims * 2;
                     found = true;
@@ -180,32 +180,42 @@ public:
         return _numOutputDims;
     }
 
+    size_t getTupleSize() const
+    {
+        return _tupleSize;
+    }
+
     size_t getTupledChunkSize() const
     {
         return _tupledArrayChunkSize;
     }
 
-    bool isInputFieldUsed(size_t const idx)
+    bool isInputFieldUsed(size_t const idx) const
     {
         return _mapToTuple[idx] !=-1;
     }
 
-    bool isInputFieldMappedToDimension(size_t const idx)
+    bool isInputFieldMappedToDimension(size_t const idx) const
     {
         return _mapToTuple[idx] !=-1 && _mapToTuple[idx] < static_cast<ssize_t>(1 + _numOutputDims * 2);
     }
 
-    void getOutputChunkPosition(Coordinates& outputCellPosition)
+    size_t mapInputFieldToTuple(size_t const idx) const
+    {
+        return _mapToTuple[idx];
+    }
+
+    void getOutputChunkPosition(Coordinates& outputCellPosition) const
     {
         _outputSchema.getChunkPositionFor(outputCellPosition);
     }
 
-    uint32_t getInstanceForChunk(Coordinates const& outputChunkPosition)
+    uint32_t getInstanceForChunk(Coordinates const& outputChunkPosition) const
     {
         return _distribution.getPrimaryChunkLocation(outputChunkPosition, _outputSchema.getDimensions(), _numInstances);
     }
 
-    ArrayDesc makeTupledSchema(shared_ptr<Query> const& query)
+    ArrayDesc makeTupledSchema(shared_ptr<Query> const& query) const
     {
         Attributes outputAttributes(_tupleSize);
         outputAttributes[0] = AttributeDesc(0, "dst_instance", TID_UINT32, 0,0);

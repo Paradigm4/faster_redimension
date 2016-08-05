@@ -26,6 +26,7 @@
 #include <query/Operator.h>
 #include <array/SortArray.h>
 #include "FasterRedimensionSettings.h"
+#include "ArrayIO.h"
 
 namespace scidb
 {
@@ -74,6 +75,19 @@ public:
     {
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
         Settings settings(inputSchema, _schema, query);
+        ArrayReader reader(inputArrays[0], settings);
+        size_t const tupleSize = settings.getTupleSize();
+        while(!reader.end())
+        {
+            vector<Value const*> tuple = reader.getTuple();
+            ostringstream tupleText;
+            for(size_t i=0; i<tupleSize; ++i)
+            {
+                tupleText<<tuple[i]->getInt64()<<" ";
+            }
+            LOG4CXX_DEBUG(logger, "FR tuple "<<tupleText.str().c_str());
+            reader.next();
+        }
         return shared_ptr<Array>(new MemArray(_schema, query));
     }
 };
