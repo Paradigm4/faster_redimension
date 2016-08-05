@@ -25,11 +25,13 @@
 
 #include <query/Operator.h>
 #include <array/SortArray.h>
+#include "FasterRedimensionSettings.h"
 
 namespace scidb
 {
 
 using namespace std;
+using namespace faster_redimension;
 
 class PhysicalFasterRedimension : public PhysicalOperator
 {
@@ -70,6 +72,8 @@ public:
 
     shared_ptr< Array> execute(vector< shared_ptr< Array> >& inputArrays, shared_ptr<Query> query)
     {
+        ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
+        Settings settings(inputSchema, _schema, query);
         return shared_ptr<Array>(new MemArray(_schema, query));
     }
 };
