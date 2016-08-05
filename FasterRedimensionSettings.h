@@ -80,7 +80,7 @@ public:
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
         _tupleSize( 1 + _numOutputDims * 2 + _numOutputAttrs),
-        _tupledArrayChunkSize( 1000000 / ((_numOutputAttrs + _numOutputDims + 10)/10)), //slightly reduce for large numbers of attributes/dimensions
+        _tupledArrayChunkSize( 1000000),
         _numInstances(query->getInstancesCount()),
         _distribution(0,""),
         _mapToTuple(_numInputAttrs + _numInputDims, -1)
@@ -234,13 +234,19 @@ public:
         for(size_t i =0; i<_numOutputAttrs; ++i)
         {
             outputAttributes[att] = AttributeDesc(att, attrs[i].getName(), attrs[i].getType(), attrs[i].getFlags(), attrs[i].getDefaultCompressionMethod());
+            ++att;
         }
         outputAttributes = addEmptyTagAttribute(outputAttributes);
         Dimensions outputDimensions;
         outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
-        outputDimensions.push_back(DimensionDesc("dst_instance_id", 0, _numInstances,                            1,                       0));
-        outputDimensions.push_back(DimensionDesc("src_instance_id", 0, _numInstances,                            1,                       0));
-        return ArrayDesc("equi_join_state" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
+        outputDimensions.push_back(DimensionDesc("dst_instance_id", 0, _numInstances-1,                           1,                       0));
+        outputDimensions.push_back(DimensionDesc("src_instance_id", 0, _numInstances-1,                           1,                       0));
+        return ArrayDesc("redimension_state" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
+    }
+
+    ArrayDesc const& getOutputSchema() const
+    {
+        return _outputSchema;
     }
 
 };

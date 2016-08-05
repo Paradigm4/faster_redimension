@@ -57,7 +57,7 @@ all: libfaster_redimension.so
 clean:
 	rm -rf *.so *.o
 
-libfaster_redimension.so: $(SRCS) FasterRedimensionSettings.h 
+libfaster_redimension.so: $(SRCS) FasterRedimensionSettings.h ArrayIO.h
 	@if test ! -d "$(SCIDB)"; then echo  "Error. Try:\n\nmake SCIDB=<PATH TO SCIDB INSTALL PATH>"; exit 1; fi
 	$(CXX) $(CCFLAGS) $(INC) -o LogicalFasterRedimension.o -c LogicalFasterRedimension.cpp
 	$(CXX) $(CCFLAGS) $(INC) -o PhysicalFasterRedimension.o -c PhysicalFasterRedimension.cpp

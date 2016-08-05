@@ -24,6 +24,7 @@
 */
 
 #include "query/Operator.h"
+#include "FasterRedimensionSettings.h"
 
 namespace scidb
 {

@@ -56,39 +56,66 @@ public:
         return RedistributeContext(createDistribution(psUndefined), _schema.getResidency() );
     }
 
-//    shared_ptr<Array> sortArray(shared_ptr<Array> & inputArray, shared_ptr<Query>& query, Settings const& settings)
-//    {
-//        SortingAttributeInfos sortingAttributeInfos(settings.getNumKeys() + 1); //plus hash
-//        sortingAttributeInfos[0].columnNo = inputArray->getArrayDesc().getAttributes(true).size()-1;
-//        sortingAttributeInfos[0].ascent = true;
-//        for(size_t k=0; k<settings.getNumKeys(); ++k)
-//        {
-//            sortingAttributeInfos[k+1].columnNo = k;
-//            sortingAttributeInfos[k+1].ascent = true;
-//        }
-//        SortArray sorter(inputArray->getArrayDesc(), _arena, false, settings.getChunkSize());
-//        shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, inputArray->getArrayDesc()));
-//        return sorter.getSortedArray(inputArray, query, tcomp);
-//    }
+    template<ArrayReadMode READ_MODE, ArrayWriteMode WRITE_MODE>
+    shared_ptr<Array> arrayPass(shared_ptr<Array>& data, shared_ptr<Query>& query, Settings const& settings)
+    {
+        ArrayReader<READ_MODE> reader(data, settings);
+        ArrayWriter<WRITE_MODE> writer(settings, query);
+        while(!reader.end())
+        {
+            writer.writeTuple(reader.getTuple());
+            reader.next();
+        }
+        return writer.finalize();
+    }
+
+    shared_ptr<Array> sortArray(shared_ptr<Array> & tupledArray, shared_ptr<Query>& query, Settings const& settings, bool pre)
+    {
+        arena::ArenaPtr sortArena = _arena;
+        if(Config::getInstance()->getOption<int>(CONFIG_RESULT_PREFETCH_QUEUE_SIZE) == 1)
+        {
+            arena::Options options;
+            options.name  ("FR sort");
+            options.parent(_arena);
+            options.threading(false);
+            options.resetting(true);
+            options.pagesize(8*1024*1024);
+            sortArena = arena::newArena(options);
+        }
+        size_t const numSortedFields = pre ? 1 : settings.getNumOutputDims() * 2;
+        SortingAttributeInfos sortingAttributeInfos(numSortedFields);
+        if(pre)
+        {
+            sortingAttributeInfos[0].columnNo = 0;
+            sortingAttributeInfos[0].ascent = true;
+        }
+        else
+        {
+            for(size_t i=0; i<numSortedFields; ++i)
+            {
+                sortingAttributeInfos[i].columnNo = i+1;
+                sortingAttributeInfos[i].ascent = true;
+            }
+        }
+        SortArray sorter(tupledArray->getArrayDesc(), sortArena, false, settings.getTupledChunkSize());
+        shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
+        return sorter.getSortedArray(tupledArray, query, tcomp);
+    }
 
     shared_ptr< Array> execute(vector< shared_ptr< Array> >& inputArrays, shared_ptr<Query> query)
     {
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
         Settings settings(inputSchema, _schema, query);
-        ArrayReader reader(inputArrays[0], settings);
-        size_t const tupleSize = settings.getTupleSize();
-        while(!reader.end())
-        {
-            vector<Value const*> tuple = reader.getTuple();
-            ostringstream tupleText;
-            for(size_t i=0; i<tupleSize; ++i)
-            {
-                tupleText<<tuple[i]->getInt64()<<" ";
-            }
-            LOG4CXX_DEBUG(logger, "FR tuple "<<tupleText.str().c_str());
-            reader.next();
-        }
-        return shared_ptr<Array>(new MemArray(_schema, query));
+        shared_ptr<Array>& inputArray = inputArrays[0];
+        inputArray = arrayPass<READ_INPUT, WRITE_TUPLED>            (inputArray, query, settings);
+        inputArray = sortArray(inputArray, query, settings, true);
+        inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
+        inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, true);
+        inputArray = sortArray(inputArray, query, settings, false);
+        return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
+
+
+        //return shared_ptr<Array>(new MemArray(_schema, query));
     }
 };
 
