@@ -372,7 +372,7 @@ public:
                 {
                     _chunkIterators[i]->flush();
                 }
-                _chunkIterators[i] = _arrayIterators[i]->newChunk(_outputChunkPosition).getIterator(_query, ChunkIterator::SEQUENTIAL_WRITE );
+                _chunkIterators[i] = _arrayIterators[i]->newChunk(_outputChunkPosition).getIterator(_query, ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK );
             }
         }
         for(size_t i=0; i<_numAttributes; ++i)
