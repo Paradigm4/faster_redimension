@@ -82,20 +82,12 @@ public:
             options.pagesize(8*1024*1024);
             sortArena = arena::newArena(options);
         }
-        size_t const numSortedFields = pre ? 1 : settings.getNumOutputDims() * 2;
+        size_t const numSortedFields = settings.getNumOutputDims()*2+1;
         SortingAttributeInfos sortingAttributeInfos(numSortedFields);
-        if(pre)
+        for(size_t i=0; i<numSortedFields; ++i)
         {
-            sortingAttributeInfos[0].columnNo = 0;
-            sortingAttributeInfos[0].ascent = true;
-        }
-        else
-        {
-            for(size_t i=0; i<numSortedFields; ++i)
-            {
-                sortingAttributeInfos[i].columnNo = i+1;
-                sortingAttributeInfos[i].ascent = true;
-            }
+            sortingAttributeInfos[i].columnNo = i;
+            sortingAttributeInfos[i].ascent = true;
         }
         SortArray sorter(tupledArray->getArrayDesc(), sortArena, false, settings.getTupledChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
