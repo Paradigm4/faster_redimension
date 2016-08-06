@@ -69,7 +69,7 @@ public:
         return writer.finalize();
     }
 
-    shared_ptr<Array> sortArray(shared_ptr<Array> & tupledArray, shared_ptr<Query>& query, Settings const& settings, bool pre)
+    shared_ptr<Array> sortArray(shared_ptr<Array> & tupledArray, shared_ptr<Query>& query, Settings const& settings)
     {
         arena::ArenaPtr sortArena = _arena;
         if(Config::getInstance()->getOption<int>(CONFIG_RESULT_PREFETCH_QUEUE_SIZE) == 1)
@@ -100,10 +100,10 @@ public:
         Settings settings(inputSchema, _schema, query);
         shared_ptr<Array>& inputArray = inputArrays[0];
         inputArray = arrayPass<READ_INPUT, WRITE_TUPLED>            (inputArray, query, settings);
-        inputArray = sortArray(inputArray, query, settings, true);
+        inputArray = sortArray(inputArray, query, settings);
         inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
         inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, true);
-        inputArray = sortArray(inputArray, query, settings, false);
+        inputArray = sortArray(inputArray, query, settings);
         return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
 
 
