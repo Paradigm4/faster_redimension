@@ -78,8 +78,8 @@ public:
             options.name  ("FR sort");
             options.parent(_arena);
             options.threading(false);
-            options.resetting(true);
-            options.pagesize(8*1024*1024);
+//            options.resetting(true);
+//            options.pagesize(8*1024*1024);
             sortArena = arena::newArena(options);
         }
         size_t const numSortedFields = settings.getNumOutputDims()*2+1;

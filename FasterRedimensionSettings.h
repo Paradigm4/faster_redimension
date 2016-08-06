@@ -80,7 +80,7 @@ public:
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
         _tupleSize( 1 + _numOutputDims * 2 + _numOutputAttrs),
-        _tupledArrayChunkSize( 1000000),
+        _tupledArrayChunkSize( 10000),
         _numInstances(query->getInstancesCount()),
         _distribution(0,""),
         _mapToTuple(_numInputAttrs + _numInputDims, -1)
