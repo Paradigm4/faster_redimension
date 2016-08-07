@@ -36,8 +36,9 @@ LIBS = -shared -Wl,-soname,libfaster_redimension.so -ldl -L. \
        -L"$(SCIDB_THIRDPARTY_PREFIX)/3rdparty/boost/lib" -L"$(SCIDB)/lib" \
        -Wl,-rpath,$(SCIDB)/lib:$(RPATH)
 
-SRCS = LogicalFasterRedimension.cpp \
-       PhysicalFasterRedimension.cpp
+SRCS = TupleAddress.cpp \
+       LogicalFasterRedimension.cpp \
+       PhysicalFasterRedimension.cpp 
 
 # Compiler settings for SciDB version >= 15.7
 ifneq ("$(wildcard /usr/bin/g++-4.9)","")
@@ -59,9 +60,10 @@ clean:
 
 libfaster_redimension.so: $(SRCS) FasterRedimensionSettings.h ArrayIO.h
 	@if test ! -d "$(SCIDB)"; then echo  "Error. Try:\n\nmake SCIDB=<PATH TO SCIDB INSTALL PATH>"; exit 1; fi
+	$(CXX) $(CCFLAGS) $(INC) -o TupleAddress.o -c TupleAddress.cpp
 	$(CXX) $(CCFLAGS) $(INC) -o LogicalFasterRedimension.o -c LogicalFasterRedimension.cpp
 	$(CXX) $(CCFLAGS) $(INC) -o PhysicalFasterRedimension.o -c PhysicalFasterRedimension.cpp
-	$(CXX) $(CCFLAGS) $(INC) -o libfaster_redimension.so plugin.cpp LogicalFasterRedimension.o PhysicalFasterRedimension.o $(LIBS)
+	$(CXX) $(CCFLAGS) $(INC) -o libfaster_redimension.so plugin.cpp TupleAddress.o LogicalFasterRedimension.o PhysicalFasterRedimension.o $(LIBS)
 	@echo "Now copy libfaster_redimension.so to $(INSTALL_DIR) on all your SciDB nodes, and restart SciDB."
 
 test:
