@@ -23,11 +23,8 @@
 * END_COPYRIGHT
 */
 
-#include "query/Operator.h"
-#include "query/FunctionLibrary.h"
-#include "query/FunctionDescription.h"
-#include "query/TypeSystem.h"
 
+#include "TupleAddress.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/assign.hpp>
@@ -72,8 +69,8 @@ void tupleAddressToString(const Value** args, Value* res, void * v)
         output<<*coord<<"|";
         ++coord;
     }
-    uint64_t* chunkPos = reinterpret_cast<uint64_t*>(coord);
-    output<<*chunkPos;
+    position_t* cellPos = reinterpret_cast<position_t*>(coord);
+    output<<*cellPos;
     res->setString(output.str());
 }
 
@@ -112,7 +109,7 @@ void stringToTupleAddress (const scidb::Value** args, scidb::Value* res, void*)
     }
 }
 
-void tupleAddressLessThan(const scidb::Value** args, scidb::Value* res, void*)
+void tupleAddressLess(const scidb::Value** args, scidb::Value* res, void*)
 {
     if(args[0]->isNull() || args[1]->isNull())
     {
@@ -122,46 +119,7 @@ void tupleAddressLessThan(const scidb::Value** args, scidb::Value* res, void*)
     {
         throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "baby don't call me on uneven addresses";
     }
-    uint32_t* instanceL = reinterpret_cast<uint32_t*>(args[0]->data());
-    uint32_t* instanceR = reinterpret_cast<uint32_t*>(args[1]->data());
-    if(*instanceL < *instanceR)
-    {
-        res->setBool(true);
-        return;
-    }
-    if(*instanceL > *instanceR)
-    {
-        res->setBool(false);
-        return;
-    }
-    size_t const numCoords =  ((args[0]->size() - sizeof(uint32_t))/sizeof(Coordinate)) - 1;
-    ++instanceL;
-    ++instanceR;
-    Coordinate* coordL = reinterpret_cast<Coordinate*>(instanceL);
-    Coordinate* coordR = reinterpret_cast<Coordinate*>(instanceR);
-    for(size_t i=0; i<numCoords; ++i)
-    {
-        if(*coordL < *coordR)
-        {
-            res->setBool(true);
-            return;
-        }
-        if(*coordL > *coordR)
-        {
-            res->setBool(false);
-            return;
-        }
-        ++coordL;
-        ++coordR;
-    }
-    uint64_t *posL = reinterpret_cast<uint64_t*>(coordL);
-    uint64_t *posR = reinterpret_cast<uint64_t*>(coordR);
-    if(*posL < *posR)
-    {
-        res->setBool(true);
-        return;
-    }
-    res->setBool(false);
+    res->setBool(tupleAddressLess(args[0], args[1]));
 }
 
 void tupleAddressEqual(const scidb::Value** args, scidb::Value* res, void*)
@@ -174,7 +132,7 @@ void tupleAddressEqual(const scidb::Value** args, scidb::Value* res, void*)
     {
         throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "baby don't call me on uneven addresses";
     }
-    res->setBool(memcmp(args[0]->data(), args[1]->data(), args[0]->size()) == 0);
+    res->setBool(tupleAddressEqual(args[0], args[1]));
 }
 
 
@@ -190,5 +148,5 @@ REGISTER_FUNCTION(string_to_tuple_address, list_of(TID_STRING), "tuple_address",
 REGISTER_CONVERTER(string, tuple_address, EXPLICIT_CONVERSION_COST, stringToTupleAddress);
 
 //Comparisons
-REGISTER_FUNCTION(<, list_of("tuple_address")("tuple_address"), TID_BOOL, tupleAddressLessThan);
+REGISTER_FUNCTION(<, list_of("tuple_address")("tuple_address"), TID_BOOL, tupleAddressLess);
 REGISTER_FUNCTION(=, list_of("tuple_address")("tuple_address"), TID_BOOL, tupleAddressEqual);

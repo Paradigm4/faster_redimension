@@ -80,13 +80,9 @@ public:
             options.threading(false);
             sortArena = arena::newArena(options);
         }
-        size_t const numSortedFields = settings.getNumOutputDims()*2+1;
-        SortingAttributeInfos sortingAttributeInfos(numSortedFields);
-        for(size_t i=0; i<numSortedFields; ++i)
-        {
-            sortingAttributeInfos[i].columnNo = i;
-            sortingAttributeInfos[i].ascent = true;
-        }
+        SortingAttributeInfos sortingAttributeInfos(1);
+        sortingAttributeInfos[0].columnNo = settings.getTupleSize()-1;
+        sortingAttributeInfos[0].ascent = true;
         SortArray sorter(tupledArray->getArrayDesc(), sortArena, false, settings.getTupledChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
         return sorter.getSortedArray(tupledArray, query, tcomp);

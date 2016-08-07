@@ -31,6 +31,7 @@
 #include <query/AttributeComparator.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
+#include <util/ArrayCoordinatesMapper.h>
 
 namespace scidb
 {
@@ -61,11 +62,19 @@ private:
     size_t const                  _numInputDims;
     size_t const                  _numOutputAttrs; //minus empty tag
     size_t const                  _numOutputDims;
-    size_t const                  _tupleSize;    //dst instance id + num output dims * 2 + output attrs
+    size_t const                  _tupleSize;    //1 + output attrs
     size_t const                  _tupledArrayChunkSize;
     size_t const                  _numInstances;
     HashedArrayDistribution const _distribution;
-    vector<ssize_t>               _mapToTuple;   //one index for each input attr, followed by one index for each input dim
+    ArrayCoordinatesMapper  const _mapper;
+    size_t                        _numInputAttributesRead;
+    vector<size_t>                _inputAttributesRead;
+    vector<size_t>                _inputAttributeDestinations; //map into output attributes [0...], then output dimensions [_nOutputAttrs...]
+    vector<bool>                  _inputAttributeFilterNull;
+    size_t                        _numInputDimensionsRead;
+    vector<size_t>                _inputDimensionsRead;
+    vector<size_t>                _inputDimensionDestinations;
+
 
 public:
     static size_t const MAX_PARAMETERS = 11;
@@ -79,11 +88,18 @@ public:
         _numInputDims(_inputSchema.getDimensions().size()),
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
-        _tupleSize( 1 + _numOutputDims * 2 + _numOutputAttrs),
-        _tupledArrayChunkSize( 10000),
+        _tupleSize( 1 + _numOutputAttrs),
+        _tupledArrayChunkSize( 100000),
         _numInstances(query->getInstancesCount()),
         _distribution(0,""),
-        _mapToTuple(_numInputAttrs + _numInputDims, -1)
+        _mapper(outputSchema.getDimensions()),
+        _numInputAttributesRead(0),
+        _inputAttributesRead(0),
+        _inputAttributeDestinations(0),
+        _inputAttributeFilterNull(0),
+        _numInputDimensionsRead(0),
+        _inputDimensionsRead(0),
+        _inputDimensionDestinations(0)
     {
         mapInputToOutput();
         logSettings();
@@ -109,7 +125,10 @@ private:
                 AttributeDesc const& outputAttr = _outputSchema.getAttributes(true)[j];
                 if (inputAttr.getName() == outputAttr.getName())
                 {
-                    _mapToTuple[i] = j + 1 + _numOutputDims * 2;
+                    _numInputAttributesRead ++;
+                    _inputAttributesRead.push_back(i);
+                    _inputAttributeDestinations.push_back(j);
+                    _inputAttributeFilterNull.push_back(false);
                     found = true;
                 }
             }
@@ -118,7 +137,10 @@ private:
                 DimensionDesc const& outputDim = _outputSchema.getDimensions()[j];
                 if(outputDim.hasNameAndAlias(inputAttr.getName()))
                 {
-                    _mapToTuple[i] = j + 1 + _numOutputDims;
+                    _numInputAttributesRead ++;
+                    _inputAttributesRead.push_back(i);
+                    _inputAttributeDestinations.push_back( _numOutputAttrs + j);
+                    _inputAttributeFilterNull.push_back(true);
                     found =true;
                 }
             }
@@ -132,7 +154,9 @@ private:
                 AttributeDesc const& outputAttr = _outputSchema.getAttributes(true)[j];
                 if (inputDim.hasNameAndAlias(outputAttr.getName()))
                 {
-                    _mapToTuple[i + _numInputAttrs] = j + 1 + _numOutputDims * 2;
+                    _numInputDimensionsRead ++;
+                    _inputDimensionsRead.push_back(i);
+                    _inputDimensionDestinations.push_back(j);
                     found = true;
                 }
             }
@@ -141,7 +165,9 @@ private:
                 DimensionDesc const& outputDim = _outputSchema.getDimensions()[j];
                 if (inputDim.hasNameAndAlias(outputDim.getBaseName()))
                 {
-                    _mapToTuple[i + _numInputAttrs] = j + 1 + _numOutputDims;
+                    _numInputDimensionsRead ++;
+                    _inputDimensionsRead.push_back(i);
+                    _inputDimensionDestinations.push_back( _numOutputAttrs + j);
                     found = true;
                 }
             }
@@ -151,9 +177,15 @@ private:
     void logSettings()
     {
         ostringstream output;
-        for(size_t i=0; i<_numInputAttrs+_numInputDims; ++i)
+        output<<"attributes ";
+        for(size_t i=0; i<_numInputAttributesRead; ++i)
         {
-            output<<i<<" -> "<<_mapToTuple[i]<<" ";
+            output<<_inputAttributesRead[i]<<" -> "<<_inputAttributeDestinations[i]<<" ";
+        }
+        output<<" dimensions ";
+        for(size_t i=0; i<_numInputDimensionsRead; ++i)
+        {
+            output<<_inputDimensionsRead[i]<<" -> "<<_inputDimensionDestinations[i]<<" ";
         }
         output<<" tchunk "<<_tupledArrayChunkSize;
         LOG4CXX_DEBUG(logger, "FR tuple mapping "<<output.str().c_str());
@@ -190,24 +222,39 @@ public:
         return _tupledArrayChunkSize;
     }
 
-    bool isInputFieldUsed(size_t const idx) const
+    size_t getNumInputAttributesRead() const
     {
-        return _mapToTuple[idx] !=-1;
+        return _numInputAttributesRead;
     }
 
-    bool isInputFieldMappedToDimension(size_t const idx) const
+    vector<size_t> const& getInputAttributesRead() const
     {
-        return _mapToTuple[idx] !=-1 && _mapToTuple[idx] < static_cast<ssize_t>(1 + _numOutputDims * 2);
+        return _inputAttributesRead;
     }
 
-    size_t mapInputFieldToTuple(size_t const idx) const
+    vector<size_t> const& getInputAttributeDestinations() const
     {
-        return _mapToTuple[idx];
+        return _inputAttributeDestinations;
     }
 
-    void getOutputChunkPosition(Coordinates& outputCellPosition) const
+    vector<bool> const& getInputAttributeFilterNull() const
     {
-        _outputSchema.getChunkPositionFor(outputCellPosition);
+        return _inputAttributeFilterNull;
+    }
+
+    size_t getNumInputDimensionsRead() const
+    {
+        return _numInputDimensionsRead;
+    }
+
+    vector<size_t> const& getInputDimensionsRead() const
+    {
+        return _inputDimensionsRead;
+    }
+
+    vector<size_t> const& getInputDimensionDestinations() const
+    {
+        return _inputDimensionDestinations;
     }
 
     uint32_t getInstanceForChunk(Coordinates const& outputChunkPosition) const
@@ -215,27 +262,36 @@ public:
         return _distribution.getPrimaryChunkLocation(outputChunkPosition, _outputSchema.getDimensions(), _numInstances);
     }
 
+    void getOutputChunkPosition(Coordinates& outputCellPosition) const
+    {
+        _outputSchema.getChunkPositionFor(outputCellPosition);
+    }
+
+    position_t getOutputCellPos(Coordinates const& outputChunkPosition, Coordinates const& outputCellPosition) const
+    {
+        return _mapper.coord2pos(outputChunkPosition, outputCellPosition);
+    }
+
+    void getOutputCellCoords(Coordinates const& outputChunkPosition, position_t const cellPos, Coordinates& outputCellCoords) const
+    {
+        _mapper.pos2coord(outputChunkPosition, cellPos, outputCellCoords);
+    }
+
+    size_t getTupleAddressSize() const
+    {
+        return sizeof(uint32_t) + sizeof(Coordinate) * _numOutputDims + sizeof(position_t);
+    }
+
     ArrayDesc makeTupledSchema(shared_ptr<Query> const& query) const
     {
         Attributes outputAttributes(_tupleSize);
         outputAttributes[0] = AttributeDesc(0, "dst_instance", TID_UINT32, 0,0);
-        AttributeID att = 1;
-        for(size_t i =0; i<_numOutputDims; ++i)
-        {
-            outputAttributes[att] = AttributeDesc(att, "chunk_pos", TID_INT64, 0,0);
-            ++att;
-        }
-        for(size_t i =0; i<_numOutputDims; ++i)
-        {
-            outputAttributes[att] = AttributeDesc(att, "cell_pos", TID_INT64, 0,0);
-            ++att;
-        }
         Attributes const& attrs = _outputSchema.getAttributes(true);
-        for(size_t i =0; i<_numOutputAttrs; ++i)
+        for(AttributeID i =0; i<_numOutputAttrs; ++i)
         {
-            outputAttributes[att] = AttributeDesc(att, attrs[i].getName(), attrs[i].getType(), attrs[i].getFlags(), attrs[i].getDefaultCompressionMethod());
-            ++att;
+            outputAttributes[i] = AttributeDesc(i, attrs[i].getName(), attrs[i].getType(), attrs[i].getFlags(), attrs[i].getDefaultCompressionMethod());
         }
+        outputAttributes[_numOutputAttrs] = AttributeDesc(_numOutputAttrs, "addr", "tuple_address", 0, 0, std::set<std::string>(), NULL, std::string(), getTupleAddressSize());
         outputAttributes = addEmptyTagAttribute(outputAttributes);
         Dimensions outputDimensions;
         outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
