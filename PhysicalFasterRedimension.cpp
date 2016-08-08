@@ -81,11 +81,74 @@ public:
             sortArena = arena::newArena(options);
         }
         SortingAttributeInfos sortingAttributeInfos(1);
-        sortingAttributeInfos[0].columnNo = settings.getTupleSize()-1;
+        sortingAttributeInfos[0].columnNo = 0;
         sortingAttributeInfos[0].ascent = true;
         SortArray sorter(tupledArray->getArrayDesc(), sortArena, false, settings.getTupledChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
         return sorter.getSortedArray(tupledArray, query, tcomp);
+    }
+
+    shared_ptr<Array> globalMerge(shared_ptr<Array>& tupled, shared_ptr<Query>& query, Settings const& settings)
+    {
+        ArrayWriter<WRITE_OUTPUT> output(settings, query);
+        size_t const numInstances = query->getInstancesCount();
+        vector<shared_ptr<ConstArrayIterator> > aiters(numInstances);
+        vector<shared_ptr<ConstChunkIterator> > citers(numInstances);
+        vector<Coordinates > positions(numInstances);
+        size_t numClosed = 0;
+        for(size_t inst =0; inst<numInstances; ++inst)
+        {
+            positions[inst].resize(3);
+            positions[inst][0] = 0;
+            positions[inst][1] = query->getInstanceID();
+            positions[inst][2] = inst;
+            aiters[inst] = tupled->getConstIterator(0);
+            if(!aiters[inst]->setPosition(positions[inst]))
+            {
+                aiters[inst].reset();
+                citers[inst].reset();
+                numClosed++;
+            }
+            else
+            {
+                citers[inst] = aiters[inst]->getChunk().getConstIterator();
+            }
+        }
+        while(numClosed < numInstances)
+        {
+            Value const* minTuple = NULL;
+            size_t toAdvance;
+            for(size_t inst=0; inst<numInstances; ++inst)
+            {
+                if(citers[inst] == 0)
+                {
+                    continue;
+                }
+                Value const* tuple = &(citers[inst]->getItem());
+                if(minTuple == NULL || RedimTuple::redimTupleLess(tuple, minTuple))
+                {
+                    minTuple = tuple;
+                    toAdvance=inst;
+                }
+            }
+            output.writeTuple(minTuple);
+            ++(*citers[toAdvance]);
+            if(citers[toAdvance]->end())
+            {
+                positions[toAdvance][0] = positions[toAdvance][0] + settings.getTupledChunkSize();
+                if(!aiters[toAdvance]->setPosition(positions[toAdvance]))
+                {
+                    aiters[toAdvance].reset();
+                    citers[toAdvance].reset();
+                    numClosed++;
+                }
+                else
+                {
+                    citers[toAdvance] = aiters[toAdvance]->getChunk().getConstIterator();
+                }
+            }
+        }
+        return output.finalize();
     }
 
     shared_ptr< Array> execute(vector< shared_ptr< Array> >& inputArrays, shared_ptr<Query> query)
@@ -97,11 +160,9 @@ public:
         inputArray = sortArray(inputArray, query, settings);
         inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
         inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, true);
-        inputArray = sortArray(inputArray, query, settings);
-        return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
-
-
-        //return shared_ptr<Array>(new MemArray(_schema, query));
+//        inputArray = sortArray(inputArray, query, settings);
+//        return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
+        return globalMerge(inputArray, query, settings);
     }
 };
 

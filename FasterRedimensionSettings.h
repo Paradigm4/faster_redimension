@@ -62,7 +62,6 @@ private:
     size_t const                  _numInputDims;
     size_t const                  _numOutputAttrs; //minus empty tag
     size_t const                  _numOutputDims;
-    size_t const                  _tupleSize;    //1 + output attrs
     size_t const                  _tupledArrayChunkSize;
     size_t const                  _numInstances;
     HashedArrayDistribution const _distribution;
@@ -74,6 +73,8 @@ private:
     size_t                        _numInputDimensionsRead;
     vector<size_t>                _inputDimensionsRead;
     vector<size_t>                _inputDimensionDestinations;
+    vector<size_t>                _outputAttributeSizes;
+    vector<bool>                  _outputAttributeNullable;
 
 
 public:
@@ -88,8 +89,7 @@ public:
         _numInputDims(_inputSchema.getDimensions().size()),
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
-        _tupleSize( 1 + _numOutputAttrs),
-        _tupledArrayChunkSize( 100000),
+        _tupledArrayChunkSize( 10000),
         _numInstances(query->getInstancesCount()),
         _distribution(0,""),
         _mapper(outputSchema.getDimensions()),
@@ -99,7 +99,9 @@ public:
         _inputAttributeFilterNull(0),
         _numInputDimensionsRead(0),
         _inputDimensionsRead(0),
-        _inputDimensionDestinations(0)
+        _inputDimensionDestinations(0),
+        _outputAttributeSizes(_numOutputAttrs),
+        _outputAttributeNullable(_numOutputAttrs)
     {
         mapInputToOutput();
         logSettings();
@@ -172,6 +174,12 @@ private:
                 }
             }
         }
+        for(size_t i =0; i<_numOutputAttrs; ++i)
+        {
+            AttributeDesc const& outputAttr = _outputSchema.getAttributes(true)[i];
+            _outputAttributeSizes[i]= outputAttr.getSize();
+            _outputAttributeNullable[i] = (outputAttr.getFlags() !=0);
+        }
     }
 
     void logSettings()
@@ -210,11 +218,6 @@ public:
     size_t getNumOutputDims() const
     {
         return _numOutputDims;
-    }
-
-    size_t getTupleSize() const
-    {
-        return _tupleSize;
     }
 
     size_t getTupledChunkSize() const
@@ -277,21 +280,20 @@ public:
         _mapper.pos2coord(outputChunkPosition, cellPos, outputCellCoords);
     }
 
-    size_t getTupleAddressSize() const
+    vector<size_t> const& getOutputAttributeSizes() const
     {
-        return sizeof(uint32_t) + sizeof(Coordinate) * _numOutputDims + sizeof(position_t);
+        return _outputAttributeSizes;
+    }
+
+    vector<bool> const& outputAttributeNullable() const
+    {
+        return _outputAttributeNullable;
     }
 
     ArrayDesc makeTupledSchema(shared_ptr<Query> const& query) const
     {
-        Attributes outputAttributes(_tupleSize);
-        outputAttributes[0] = AttributeDesc(0, "dst_instance", TID_UINT32, 0,0);
-        Attributes const& attrs = _outputSchema.getAttributes(true);
-        for(AttributeID i =0; i<_numOutputAttrs; ++i)
-        {
-            outputAttributes[i] = AttributeDesc(i, attrs[i].getName(), attrs[i].getType(), attrs[i].getFlags(), attrs[i].getDefaultCompressionMethod());
-        }
-        outputAttributes[_numOutputAttrs] = AttributeDesc(_numOutputAttrs, "addr", "tuple_address", 0, 0, std::set<std::string>(), NULL, std::string(), getTupleAddressSize());
+        Attributes outputAttributes(1);
+        outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0);
         outputAttributes = addEmptyTagAttribute(outputAttributes);
         Dimensions outputDimensions;
         outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));

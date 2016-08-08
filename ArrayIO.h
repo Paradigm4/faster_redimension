@@ -27,8 +27,8 @@
 #define ARRAYIO_H_
 
 #include "FasterRedimensionSettings.h"
-#include "TupleAddress.h"
 #include <util/Network.h>
+#include "RedimensionTuple.h"
 
 namespace scidb
 {
@@ -48,57 +48,40 @@ class ArrayReader
 private:
     shared_ptr<Array>                       _input;
     Settings const&                         _settings;
-    vector<Value const*>                    _tuple;
-    size_t const                            _nOutputDimensions;
-    size_t const                            _nOutputAttributes;
-    size_t const                            _nInputAttributes;
-    vector<size_t> const&                   _inputAttributes;             //indeces of the attributes we're reading;
-    vector<size_t> const&                   _inputAttributeDestinations;  //map each attribute we're reading to tuple
-    vector<bool>   const&                   _inputAttributeFilterNull;    //true if the respective attribute should be filtered for NULL
-    size_t const                            _nInputDimensions;
-    vector<size_t> const&                   _inputDimensions;              //indece of the dimensions we're reading
-    vector<size_t> const&                   _inputDimensionDestinations;   //map each dimension we're reading to tuple
-    vector<Value>                           _dimVals;
     size_t const                            _numIterators;
+    vector<Value const*>                    _tupleInputs;
+    vector<Value>                           _inputDimensionVals;
     vector<shared_ptr<ConstArrayIterator> > _aiters;
     vector<shared_ptr<ConstChunkIterator> > _citers;
-    Coordinates                             _cellPos;
-    Coordinates                             _chunkPos;
+    Coordinates                             _cellCoords;
+    Coordinates                             _chunkCoords;
     uint32_t                                _dstInstanceId;
     position_t                              _cellLPos;
-    Value                                   _tupleAddress;
+    Value                                   _tupleValue;
+    Value const*                            _tupleOutput;
 
 
 public:
     ArrayReader( shared_ptr<Array>& input, Settings const& settings):
         _input(input),
         _settings(settings),
-        _tuple(settings.getTupleSize()),
-        _nOutputDimensions(settings.getNumOutputDims()),
-        _nOutputAttributes(settings.getNumOutputAttrs()),
-        _nInputAttributes(MODE == READ_INPUT ? settings.getNumInputAttributesRead() : settings.getTupleSize()),
-        _inputAttributes(settings.getInputAttributesRead()),
-        _inputAttributeDestinations(settings.getInputAttributeDestinations()),
-        _inputAttributeFilterNull(settings.getInputAttributeFilterNull()),
-        _nInputDimensions(settings.getNumInputDimensionsRead()),
-        _inputDimensions(settings.getInputDimensionsRead()),
-        _inputDimensionDestinations(settings.getInputDimensionDestinations()),
-        _dimVals(_nInputDimensions),
-        _numIterators( _nInputAttributes ==0 ? 1 : _nInputAttributes ),
+        _numIterators( MODE==READ_TUPLED ? 1 : (_settings.getNumInputAttributesRead() > 0 ? _settings.getNumInputAttributesRead() : 1)),
+        _tupleInputs( MODE== READ_INPUT ? _settings.getNumOutputAttrs() : 0),
+        _inputDimensionVals(MODE== READ_INPUT ? _settings.getNumInputDimensionsRead() : 0),
         _aiters(_numIterators),
         _citers(_numIterators),
-        _cellPos(_nOutputDimensions),
-        _chunkPos(_nOutputDimensions)
+        _cellCoords(_settings.getNumOutputDims()),
+        _chunkCoords(_settings.getNumOutputDims())
     {
         for(size_t i =0; i<_numIterators; ++i)
         {
-            if(_nInputAttributes ==0)
+            if(_settings.getNumInputAttributesRead() ==0)
             {
                 _aiters[i] = _input->getConstIterator(_input->getArrayDesc().getAttributes(true).size()); //empty tag
             }
             else if( MODE==READ_INPUT)
             {
-                _aiters[i] = _input->getConstIterator(_inputAttributes[i]);
+                _aiters[i] = _input->getConstIterator(_settings.getInputAttributesRead()[i]);
             }
             else
             {
@@ -107,7 +90,7 @@ public:
         }
         if(MODE == READ_INPUT)
         {
-            _tuple[settings.getTupleSize()-1] = &_tupleAddress;
+            _tupleOutput = &_tupleValue;
         }
         if(!end())
         {
@@ -118,54 +101,56 @@ public:
 private:
     bool setAndCheckTuple()
     {
-        for(size_t i =0; i<_nInputAttributes; ++i)
-        {
-            Value const* item = &(_citers[i]->getItem());
-            if(MODE == READ_INPUT)
-            {
-                if(_inputAttributeFilterNull[i] && item->isNull())
-                {
-                    return false;
-                }
-                size_t idx = MODE==READ_INPUT ? _inputAttributeDestinations[i] : i;
-                if(idx < _nOutputAttributes)
-                {
-                    _tuple[idx] = item;
-                }
-                else
-                {
-                    _cellPos[idx - _nOutputAttributes] = item->getInt64();
-                }
-            }
-            else
-            {
-                _tuple[i] = item;
-            }
-        }
         if(MODE==READ_TUPLED)
         {
+            _tupleOutput = &(_citers[0]->getItem());
             return true;
         }
-        Coordinates const& pos = _citers[0]->getPosition();
-        for(size_t i =0; i<_nInputDimensions; ++i)
+        for(size_t i =0; i<_settings.getNumInputAttributesRead(); ++i)
         {
-            Coordinate c = pos[_inputDimensions[i]];
-            size_t idx = _inputDimensionDestinations[i];
-            if(idx < _nOutputAttributes)
+            Value const* item = &(_citers[i]->getItem());
+            if(_settings.getInputAttributeFilterNull()[i] && item->isNull())
             {
-                _dimVals[i].setInt64(c);
-                _tuple[idx] = &_dimVals[i];
+                return false;
+            }
+            size_t idx = _settings.getInputAttributeDestinations()[i];
+            if(idx < _settings.getNumOutputAttrs())
+            {
+                _tupleInputs[idx] = item;
             }
             else
             {
-                _cellPos[idx - _nOutputAttributes] = c;
+                _cellCoords[idx - _settings.getNumOutputAttrs()] = item->getInt64();
             }
         }
-        _chunkPos = _cellPos;
-        _settings.getOutputChunkPosition(_chunkPos);
-        _dstInstanceId = _settings.getInstanceForChunk(_chunkPos);
-        _cellLPos = _settings.getOutputCellPos(_chunkPos, _cellPos);
-        makeTupleAddress(_dstInstanceId, _chunkPos, _cellLPos, _nOutputDimensions, &_tupleAddress);
+        Coordinates const& pos = _citers[0]->getPosition();
+        for(size_t i =0; i<_settings.getNumInputDimensionsRead(); ++i)
+        {
+            Coordinate coord = pos[_settings.getInputDimensionsRead()[i]];
+            size_t idx = _settings.getInputDimensionDestinations()[i];
+            if(idx < _settings.getNumOutputAttrs())
+            {
+                _inputDimensionVals[i].setInt64(coord);
+                _tupleInputs[idx] = &_inputDimensionVals[i];
+            }
+            else
+            {
+                _cellCoords[idx - _settings.getNumOutputAttrs()] = coord;
+            }
+        }
+        _chunkCoords = _cellCoords;
+        _settings.getOutputChunkPosition(_chunkCoords);
+        _dstInstanceId = _settings.getInstanceForChunk(_chunkCoords);
+        _cellLPos = _settings.getOutputCellPos(_chunkCoords, _cellCoords);
+        RedimTuple::makeRedimTuple(_settings.getNumOutputDims(),
+                                   _settings.getNumOutputAttrs(),
+                                   _settings.outputAttributeNullable(),
+                                   _settings.getOutputAttributeSizes(),
+                                   _dstInstanceId,
+                                   _chunkCoords,
+                                   _cellLPos,
+                                   _tupleInputs,
+                                   &_tupleValue);
         return true; //we got a valid tuple!
     }
 
@@ -230,13 +215,13 @@ public:
         return _aiters[0]->end();
     }
 
-    vector<Value const*> const& getTuple()
+    Value const* getTuple()
     {
         if(end())
         {
             throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "Internal inconsistency";
         }
-        return _tuple;
+        return _tupleOutput;
     }
 };
 
@@ -267,15 +252,15 @@ private:
     vector<shared_ptr<ArrayIterator> >  _arrayIterators;
     vector<shared_ptr<ChunkIterator> >  _chunkIterators;
     size_t                              _currentDstInstanceId;
+    vector<Value>                       _outputValues;
     Value                               _boolTrue;
-
 
 public:
     ArrayWriter(Settings const& settings, shared_ptr<Query> const& query):
         _output               (std::make_shared<MemArray>( MODE==WRITE_OUTPUT ? settings.getOutputSchema() : settings.makeTupledSchema(query), query)),
         _myInstanceId         (query->getInstanceID()),
         _numInstances         (query->getInstancesCount()),
-        _numAttributes        (_output->getArrayDesc().getAttributes(true).size() ),
+        _numAttributes        (_output->getArrayDesc().getAttributes(true).size()),
         _numTupleDimensions   (settings.getNumOutputDims()),
         _chunkSize            (settings.getTupledChunkSize()),
         _query                (query),
@@ -286,7 +271,8 @@ public:
         _outputPositionBuf       ( MODE == WRITE_OUTPUT ? _output->getArrayDesc().getDimensions().size() : 0, 0),
         _arrayIterators       (_numAttributes+1, NULL),
         _chunkIterators       (_numAttributes+1, NULL),
-        _currentDstInstanceId (0)
+        _currentDstInstanceId (0),
+        _outputValues         (MODE == WRITE_OUTPUT ? _settings.getNumOutputAttrs() : 0)
     {
         _boolTrue.setBool(true);
         for(size_t i =0; i<_numAttributes+1; ++i)
@@ -299,12 +285,12 @@ public:
         }
     }
 
-    void writeTuple(vector<Value const*> const& tuple)
+    void writeTuple(Value const* tuple)
     {
         bool newChunk = false;
         if(MODE == WRITE_SPLIT_ON_INSTANCE)
         {
-            uint32_t dstInstanceId = getInstanceId(tuple[ _numAttributes-1 ]);
+            uint32_t dstInstanceId = RedimTuple::getInstanceId(tuple);
             if(dstInstanceId != _currentDstInstanceId)
             {
                 _currentDstInstanceId = dstInstanceId;
@@ -321,8 +307,17 @@ public:
         }
         else if (MODE == WRITE_OUTPUT)
         {
-            getChunkPos(tuple[_numAttributes], _numTupleDimensions, _outputChunkPositionBuf);
-            position_t cellPos = getCellPos(tuple[_numAttributes], _numTupleDimensions);
+            uint32_t dstInstanceId;
+            position_t cellPos;
+            RedimTuple::decomposeTuple(_settings.getNumOutputDims(),
+                                       _settings.getNumOutputAttrs(),
+                                       _settings.outputAttributeNullable(),
+                                       _settings.getOutputAttributeSizes(),
+                                       tuple,
+                                       dstInstanceId,
+                                       _outputChunkPositionBuf,
+                                       cellPos,
+                                       _outputValues);
             _settings.getOutputCellCoords(_outputChunkPositionBuf, cellPos, _outputPositionBuf);
             if(_outputChunkPosition.size() == 0) //first one!
             {
@@ -351,10 +346,18 @@ public:
                 _chunkIterators[i] = _arrayIterators[i]->newChunk(_outputChunkPosition).getIterator(_query, ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK );
             }
         }
-        for(size_t i=0; i<_numAttributes; ++i)
+        if(MODE==WRITE_OUTPUT)
         {
-            _chunkIterators[i]->setPosition(_outputPosition);
-            _chunkIterators[i]->writeItem(*(tuple[i]));
+            for(size_t i=0; i<_numAttributes; ++i)
+            {
+                _chunkIterators[i]->setPosition(_outputPosition);
+                _chunkIterators[i]->writeItem(_outputValues[i]);
+            }
+        }
+        else
+        {
+            _chunkIterators[0]->setPosition(_outputPosition);
+            _chunkIterators[0]->writeItem(*tuple);
         }
         _chunkIterators[_numAttributes]->setPosition(_outputPosition);
         _chunkIterators[_numAttributes]->writeItem(_boolTrue);
