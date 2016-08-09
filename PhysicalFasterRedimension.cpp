@@ -196,7 +196,7 @@ public:
         SortingAttributeInfos sortingAttributeInfos(1);
         sortingAttributeInfos[0].columnNo = 0;
         sortingAttributeInfos[0].ascent = true;
-        SortArray sorter(tupledArray->getArrayDesc(), sortArena, false, settings.getTupledChunkSize());
+        SortArray sorter(settings.makeTupledSchema(query, true), sortArena, false, settings.getTupledChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
         return sorter.getSortedArray(tupledArray, query, tcomp);
     }

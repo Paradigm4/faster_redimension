@@ -91,7 +91,7 @@ public:
         _numInputDims(_inputSchema.getDimensions().size()),
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
-        _tupledArrayChunkSize( 100000),
+        _tupledArrayChunkSize( 1000000),
         _numInstances(query->getInstancesCount()),
         _sortChunkSizeLimit(Config::getInstance()->getOption<int>(CONFIG_MERGE_SORT_BUFFER) * 1024 * 1024),
         _sgChunkSizeLimit(_sortChunkSizeLimit / _numInstances),
@@ -304,10 +304,33 @@ public:
         return _sgChunkSizeLimit;
     }
 
-    ArrayDesc makeTupledSchema(shared_ptr<Query> const& query) const
+    size_t computeApproximateTupleSize() const
+    {
+        size_t result =  sizeof(uint8_t) + sizeof(uint32_t) + sizeof(Coordinate)*_numOutputDims + sizeof(position_t);
+        for(size_t i=0; i<_numOutputAttrs; ++i)
+        {
+            if(_outputAttributeNullable[i])
+            {
+                result += sizeof(int8_t);
+            }
+            if(_outputAttributeSizes[i]!=0) //fixed size
+            {
+                result += _outputAttributeSizes[i];
+            }
+            else
+            {
+                result += sizeof(uint32_t);
+                result += Config::getInstance()->getOption<int>(CONFIG_STRING_SIZE_ESTIMATION);
+            }
+        }
+        return result;
+    }
+
+    ArrayDesc makeTupledSchema(shared_ptr<Query> const& query, bool includeApproximateTupleSize = false) const
     {
         Attributes outputAttributes(1);
-        outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0);
+        outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0, std::set<std::string>(), NULL, std::string(),
+                                            includeApproximateTupleSize ? computeApproximateTupleSize() : 0);
         outputAttributes = addEmptyTagAttribute(outputAttributes);
         Dimensions outputDimensions;
         outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
