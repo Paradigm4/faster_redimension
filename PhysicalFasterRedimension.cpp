@@ -25,6 +25,7 @@
 
 #include <query/Operator.h>
 #include <array/SortArray.h>
+#include <array/RLE.h>
 #include "FasterRedimensionSettings.h"
 #include "ArrayIO.h"
 
@@ -301,6 +302,236 @@ public:
     }
 };
 
+///
+///
+
+
+static size_t getChunkOverheadSize()
+{
+    return             (  sizeof(ConstRLEPayload::Header) +
+                                 2 * sizeof(ConstRLEPayload::Segment) +
+                                 sizeof(varpart_offset_t) + 5);
+}
+
+static size_t getSizeOffset()
+{
+    return getChunkOverheadSize()-4;
+}
+
+class TupleSgArray : public SinglePassArray
+{
+private:
+    typedef SinglePassArray super;
+    size_t _rowIndex;
+    Address _chunkAddress;
+    Coordinates _posBuf;
+    MemChunk _chunk;
+    std::weak_ptr<Query> _query;
+    size_t const _binaryChunkSizeLimit;
+    size_t const _chunkOverheadSize;
+    ArrayReader<READ_TUPLED> _reader;
+    char* _bufPointer;
+    uint32_t* _sizePointer;
+
+public:
+    TupleSgArray(shared_ptr<Array> & input, Settings const& settings, shared_ptr<Query>& query):
+        super(settings.makeSgSchema(query)),
+        _rowIndex(0),
+        _chunkAddress(0, Coordinates(3,0)),
+        _posBuf(3,0),
+        _query(query),
+        _binaryChunkSizeLimit(settings.getSgChunkSizeLimit()),
+        _chunkOverheadSize(getChunkOverheadSize()),
+        _reader(input, settings)
+    {
+        super::setEnforceHorizontalIteration(true);
+        _chunkAddress.coords[0]=-1;
+        _chunkAddress.coords[2] = query->getInstanceID();
+        if(!_reader.end())
+        {
+            _chunkAddress.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+        }
+        try
+        {
+            _chunk.allocate(_chunkOverheadSize + _binaryChunkSizeLimit);
+        }
+        catch(...)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "TupleSgArray cannot allocate memory";
+        }
+        _bufPointer = (char*) _chunk.getData();
+        ConstRLEPayload::Header* hdr = (ConstRLEPayload::Header*) _bufPointer;
+        hdr->_magic = RLE_PAYLOAD_MAGIC;
+        hdr->_nSegs = 1;
+        hdr->_elemSize = 0;
+        hdr->_dataSize = _binaryChunkSizeLimit + 5 + sizeof(varpart_offset_t);
+        hdr->_varOffs = sizeof(varpart_offset_t);
+        hdr->_isBoolean = 0;
+        ConstRLEPayload::Segment* seg = (ConstRLEPayload::Segment*) (hdr+1);
+        *seg =  ConstRLEPayload::Segment(0,0,false,false);
+        ++seg;
+        *seg =  ConstRLEPayload::Segment(1,0,false,false);
+        varpart_offset_t* vp =  reinterpret_cast<varpart_offset_t*>(seg+1);
+        *vp = 0;
+        uint8_t* sizeFlag = reinterpret_cast<uint8_t*>(vp+1);
+        *sizeFlag =0;
+        _sizePointer = reinterpret_cast<uint32_t*> (sizeFlag + 1);
+        *_sizePointer = static_cast<uint32_t>(_binaryChunkSizeLimit);
+        _bufPointer = reinterpret_cast<char*> (_sizePointer+1);
+    }
+
+    size_t getCurrentRowIndex() const
+    {
+        return _rowIndex;
+    }
+
+    bool moveNext(size_t rowIndex)
+    {
+        if(_reader.end())
+        {
+            return false;
+        }
+        _bufPointer = reinterpret_cast<char*> (_sizePointer+1);
+        _chunkAddress.coords[0]++;
+        _chunk.initialize(this, &super::getArrayDesc(), _chunkAddress, 0);
+        size_t dataSize = 0;
+        while(!_reader.end() && (dataSize + _reader.getTuple()->size() + 2*sizeof(uint32_t)) < _binaryChunkSizeLimit &&
+                RedimTuple::getInstanceId(_reader.getTuple()) == _chunkAddress.coords[1])
+        {
+            Value const* tuple = _reader.getTuple();
+            uint32_t const tupleSize = tuple->size();
+            uint32_t* sizePtr = reinterpret_cast<uint32_t*>(_bufPointer);
+            dataSize += (tupleSize + sizeof(uint32_t));
+            *sizePtr = tupleSize;
+            ++sizePtr;
+            _bufPointer = reinterpret_cast<char*>(sizePtr);
+            memcpy(_bufPointer, tuple->data(), tupleSize);
+            _bufPointer += tupleSize;
+            _reader.next();
+        }
+        if(dataSize == 0)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "tuples too large for chunks; raise the (merge-sort-buffer) memory limit";
+        }
+        else
+        {
+            uint32_t* terminatorPtr = reinterpret_cast<uint32_t*>(_bufPointer);
+            *terminatorPtr = 0;
+            dataSize += sizeof(uint32_t);
+            *_sizePointer = static_cast<uint32_t>(dataSize);
+        }
+        ++_rowIndex;
+        if(!_reader.end() && RedimTuple::getInstanceId(_reader.getTuple()) != _chunkAddress.coords[1])
+        {
+            _chunkAddress.coords[0] = -1;
+            _chunkAddress.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+        }
+        return true;
+    }
+
+    ConstChunk const& getChunk(AttributeID attr, size_t rowIndex)
+    {
+        if(attr==0)
+        {
+            return _chunk;
+        }
+        throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "internal inconsistency";
+    }
+};
+
+class TupleUnpacker
+{
+private:
+    size_t const _overheadSize;
+    size_t const _sizeOffset;
+    ConstChunk const* _chunkPtr;
+    char *_readPtr;
+    Value _tupleBuf;
+
+public:
+    TupleUnpacker():
+        _overheadSize(getChunkOverheadSize()),
+        _sizeOffset(getSizeOffset()),
+        _chunkPtr(0),
+        _readPtr(0)
+    {}
+
+    ~TupleUnpacker()
+    {
+        if(_chunkPtr)
+        {
+            _chunkPtr->unPin();
+            _chunkPtr = NULL;
+        }
+    }
+
+    void setChunk(ConstChunk const* chunk)
+    {
+        if(_chunkPtr)
+        {
+            _chunkPtr->unPin();
+        }
+        _chunkPtr = chunk;
+        _chunkPtr->pin();
+        uint32_t chunkSize = *(reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(_chunkPtr->getData()) + _sizeOffset));
+        if(chunkSize == 0)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "[defensive] encountered a chunk with no data.";
+        }
+        _readPtr = reinterpret_cast<char*>(_chunkPtr->getData()) + _overheadSize;
+        uint32_t* tupleSizePtr = reinterpret_cast<uint32_t*>(_readPtr);
+        uint32_t const tupleSize = *tupleSizePtr;
+        if(tupleSize == 0)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "[defensive] encountered a chunk with the first zero tuple.";
+        }
+        //_tupleBuf.setSize(tupleSize);
+        ++tupleSizePtr;
+        _readPtr = reinterpret_cast<char*> (tupleSizePtr);
+        _tupleBuf.setData(_readPtr, tupleSize);
+        _readPtr += tupleSize;
+    }
+
+    Value const* getTuple()
+    {
+        return &_tupleBuf;
+    }
+
+    void next()
+    {
+        if(_chunkPtr == NULL)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "internal inconsistency";
+        }
+        uint32_t* tupleSizePtr = reinterpret_cast<uint32_t*>(_readPtr);
+        uint32_t const tupleSize = *tupleSizePtr;
+        if(tupleSize == 0)
+        {
+            _chunkPtr->unPin();
+            _chunkPtr = NULL;
+            return;
+        }
+        ++tupleSizePtr;
+        _readPtr = reinterpret_cast<char*> (tupleSizePtr);
+        _tupleBuf.setData(_readPtr, tupleSize);
+        _readPtr += tupleSize;
+    }
+
+    bool end()
+    {
+        return (_chunkPtr == 0);
+    }
+
+    void clear()
+    {
+        if(_chunkPtr != NULL)
+        {
+            _chunkPtr->unPin();
+            _chunkPtr = NULL;
+        }
+    }
+};
+
 }
 
 using namespace std;
@@ -351,7 +582,7 @@ public:
         SortingAttributeInfos sortingAttributeInfos(1);
         sortingAttributeInfos[0].columnNo = 0;
         sortingAttributeInfos[0].ascent = true;
-        SortArray sorter(settings.makeTupledSchema(query, true), sortArena, false, settings.getTupledChunkSize());
+        SortArray sorter(settings.makePreSortSchema(query, true), sortArena, false, settings.getTupledChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
         return sorter.getSortedArray(tupledArray, query, tcomp);
     }
@@ -419,6 +650,70 @@ public:
         return output.finalize();
     }
 
+
+    shared_ptr<Array> globalMergeAuga(shared_ptr<Array>& tupled, shared_ptr<Query>& query, Settings const& settings)
+    {
+        ArrayWriter<WRITE_OUTPUT> output(settings, query);
+        size_t const numInstances = query->getInstancesCount();
+        vector<shared_ptr<ConstArrayIterator> > aiters(numInstances);
+        vector<TupleUnpacker> unpackers(numInstances);
+        vector<Coordinates > positions(numInstances);
+        size_t numClosed = 0;
+        for(size_t inst =0; inst<numInstances; ++inst)
+        {
+            positions[inst].resize(3);
+            positions[inst][0] = 0;
+            positions[inst][1] = query->getInstanceID();
+            positions[inst][2] = inst;
+            aiters[inst] = tupled->getConstIterator(0);
+            if(!aiters[inst]->setPosition(positions[inst]))
+            {
+                aiters[inst].reset();
+                unpackers[inst].clear();
+                numClosed++;
+            }
+            else
+            {
+                unpackers[inst].setChunk(&aiters[inst]->getChunk());
+            }
+        }
+        while(numClosed < numInstances)
+        {
+            Value const* minTuple = NULL;
+            size_t toAdvance;
+            for(size_t inst=0; inst<numInstances; ++inst)
+            {
+                if(unpackers[inst].end())
+                {
+                    continue;
+                }
+                Value const* tuple = unpackers[inst].getTuple();
+                if(minTuple == NULL || RedimTuple::redimTupleLess(tuple, minTuple))
+                {
+                    minTuple = tuple;
+                    toAdvance=inst;
+                }
+            }
+            output.writeTuple(minTuple);
+            unpackers[toAdvance].next();
+            if(unpackers[toAdvance].end())
+            {
+                positions[toAdvance][0] = positions[toAdvance][0] + 1;
+                if(!aiters[toAdvance]->setPosition(positions[toAdvance]))
+                {
+                    aiters[toAdvance].reset();
+                    unpackers[toAdvance].clear();
+                    numClosed++;
+                }
+                else
+                {
+                    unpackers[toAdvance].setChunk(&aiters[toAdvance]->getChunk());
+                }
+            }
+        }
+        return output.finalize();
+    }
+
     shared_ptr< Array> execute(vector< shared_ptr< Array> >& inputArrays, shared_ptr<Query> query)
     {
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
@@ -429,11 +724,11 @@ public:
         inputArray = shared_ptr<Array>(new InputScannerArray(inputArray,settings, query));
         inputArray = sortArray(inputArray, query, settings);
 
+//        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_TUPLED>(inputArray,settings, query));
 
-
-        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_TUPLED>(inputArray,settings, query));
+        inputArray = shared_ptr<Array>(new TupleSgArray(inputArray,settings, query));
         inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, false);
-        return globalMerge(inputArray, query, settings);
+        return globalMergeAuga(inputArray, query, settings);
     }
 };
 

@@ -349,6 +349,17 @@ public:
         return ArrayDesc("redimension_presort" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
     }
 
+    ArrayDesc makeSgSchema(shared_ptr<Query> const& query) const
+    {
+        Attributes outputAttributes(1);
+        outputAttributes[0] = AttributeDesc(0, "tuple_set", TID_BINARY, 0,0);
+        Dimensions outputDimensions;
+        outputDimensions.push_back(DimensionDesc("chunk_no",        0,  CoordinateBounds::getMax(),               1,                       0));
+        outputDimensions.push_back(DimensionDesc("dst_instance_id", 0, _numInstances-1,                           1,                       0));
+        outputDimensions.push_back(DimensionDesc("src_instance_id", 0, _numInstances-1,                           1,                       0));
+        return ArrayDesc("redimension_sg" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
+    }
+
     ArrayDesc const& getOutputSchema() const
     {
         return _outputSchema;
