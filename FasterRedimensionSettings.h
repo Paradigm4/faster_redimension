@@ -339,6 +339,16 @@ public:
         return ArrayDesc("redimension_state" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
     }
 
+    ArrayDesc makePreSortSchema(shared_ptr<Query> const& query, bool includeApproximateTupleSize = false) const
+    {
+        Attributes outputAttributes(1);
+        outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0, std::set<std::string>(), NULL, std::string(),
+                                            includeApproximateTupleSize ? computeApproximateTupleSize() : 0);
+        Dimensions outputDimensions;
+        outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
+        return ArrayDesc("redimension_presort" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
+    }
+
     ArrayDesc const& getOutputSchema() const
     {
         return _outputSchema;

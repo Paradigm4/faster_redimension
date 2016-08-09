@@ -146,6 +146,161 @@ public:
     }
 };
 
+
+class InputScannerChunkIterator : public ConstChunkIterator
+{
+private:
+    ArrayReader<READ_INPUT>& _reader;
+    size_t const _cellsPerChunkLimit;
+    size_t const _binaryChunkSizeLimit;
+    size_t _cellsRead;
+    size_t _bytesRead;
+    Coordinates _pos;
+
+public:
+    InputScannerChunkIterator(ArrayReader<READ_INPUT>& reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+        _reader(reader),
+        _cellsPerChunkLimit(cellsPerChunkLimit),
+        _binaryChunkSizeLimit(binaryChunkSizeLimit),
+        _cellsRead(0),
+        _bytesRead(0),
+        _pos(1,0)
+    {}
+
+    virtual bool isEmpty() const
+    {
+        return false;
+    }
+
+    virtual Value const& getItem()
+    {
+        return *(_reader.getTuple());
+    }
+
+    virtual void operator ++()
+    {
+        ++_cellsRead;
+        _bytesRead += (_reader.getTuple()->size() + sizeof(Value));
+        _reader.next();
+    }
+
+    virtual bool end()
+    {
+        return _reader.end() || _cellsRead >= _cellsPerChunkLimit || _bytesRead >= _binaryChunkSizeLimit;
+    }
+
+    virtual Coordinates const& getPosition()
+    {
+        return _pos;
+    }
+
+    virtual int getMode() const                      { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getMode call"; }
+    virtual bool setPosition(Coordinates const& pos) { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator setPosition call"; }
+    virtual void reset()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator reset call"; }
+    ConstChunk const& getChunk()                     { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getChunk call"; }
+    virtual std::shared_ptr<Query> getQuery()        { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getQuery call"; }
+};
+
+class InputScannerChunk : public ConstChunk
+{
+private:
+    ArrayReader<READ_INPUT>& _reader;
+    size_t const _cellsPerChunkLimit;
+    size_t const _binaryChunkSizeLimit;
+
+public:
+    InputScannerChunk(ArrayReader<READ_INPUT>&  reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+        _reader(reader),
+        _cellsPerChunkLimit(cellsPerChunkLimit),
+        _binaryChunkSizeLimit(binaryChunkSizeLimit)
+    {}
+
+    virtual shared_ptr<ConstChunkIterator> getConstIterator(int iterationMode) const
+    {
+        return shared_ptr<ConstChunkIterator>(new InputScannerChunkIterator(_reader, _cellsPerChunkLimit, _binaryChunkSizeLimit));
+    }
+
+    virtual const ArrayDesc& getArrayDesc() const                              { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getArrayDesc call"; }
+    virtual const AttributeDesc& getAttributeDesc() const                      { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getAttributeDesc call"; }
+    virtual Coordinates const& getFirstPosition(bool withOverlap) const        { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getFirstPosition call"; }
+    virtual Coordinates const& getLastPosition(bool withOverlap) const         { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getLastPosition call"; }
+    virtual int getCompressionMethod() const                                   { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getCompressionMethod call"; }
+    virtual Array const& getArray() const                                      { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getArray call"; }
+};
+
+
+class InputScannerArrayIterator : public ConstArrayIterator
+{
+private:
+    ArrayReader<READ_INPUT>& _reader;
+    InputScannerChunk _chunk;
+    Coordinates _pos;
+    size_t const _cellsPerChunkLimit;
+    size_t const _binaryChunkSizeLimit;
+
+public:
+    InputScannerArrayIterator(ArrayReader<READ_INPUT>& reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+        _reader(reader),
+        _chunk(_reader, cellsPerChunkLimit, binaryChunkSizeLimit),
+        _pos(1,0),
+        _cellsPerChunkLimit(cellsPerChunkLimit),
+        _binaryChunkSizeLimit(binaryChunkSizeLimit)
+    {}
+
+    virtual ConstChunk const& getChunk()
+    {
+        return _chunk;
+    }
+
+    virtual bool end()
+    {
+        return _reader.end();
+    }
+
+    virtual void operator ++()
+    {}
+
+    virtual Coordinates const& getPosition()
+    {
+        return _pos;
+    }
+
+    virtual bool setPosition(Coordinates const& pos) { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array iterator setPosition call"; }
+    virtual void reset()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array iterator reset call"; }
+};
+
+class InputScannerArray : public Array
+{
+private:
+    ArrayDesc _desc;
+    mutable ArrayReader<READ_INPUT> _reader;
+    size_t const _cellsPerChunkLimit;
+    size_t const _binaryChunkSizeLimit;
+
+public:
+    InputScannerArray(shared_ptr<Array>& inputArray, Settings const& settings,  shared_ptr<Query>& query):
+        _desc(settings.makePreSortSchema(query)),
+        _reader(inputArray, settings),
+        _cellsPerChunkLimit(settings.getTupledChunkSize()),
+        _binaryChunkSizeLimit(settings.getSortChunkSizeLimit())
+    {}
+
+    virtual ArrayDesc const& getArrayDesc() const
+    {
+        return _desc;
+    }
+
+    virtual Access getSupportedAccess() const
+    {
+        return SINGLE_PASS; //Don't multithread on me! (tm)
+    }
+
+    virtual std::shared_ptr<ConstArrayIterator> getConstIterator(AttributeID attr) const
+    {
+        return shared_ptr<ConstArrayIterator>(new InputScannerArrayIterator(_reader, _cellsPerChunkLimit, _binaryChunkSizeLimit));
+    }
+};
+
 }
 
 using namespace std;
@@ -269,14 +424,15 @@ public:
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
         Settings settings(inputSchema, _schema, query);
         shared_ptr<Array>& inputArray = inputArrays[0];
-        //inputArray = arrayPass<READ_INPUT, WRITE_TUPLED>            (inputArray, query, settings);
-        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_INPUT>(inputArray,settings, query));
+
+        //inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_INPUT>(inputArray,settings, query));
+        inputArray = shared_ptr<Array>(new InputScannerArray(inputArray,settings, query));
         inputArray = sortArray(inputArray, query, settings);
+
+
+
         inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_TUPLED>(inputArray,settings, query));
-//        inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
         inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, false);
-//        inputArray = sortArray(inputArray, query, settings);
-//        return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
         return globalMerge(inputArray, query, settings);
     }
 };
