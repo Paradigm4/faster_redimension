@@ -210,12 +210,12 @@ public:
         }
     }
 
-    bool end()
+    bool end() const
     {
         return _aiters[0]->end();
     }
 
-    Value const* getTuple()
+    Value const* getTuple() const
     {
         if(end())
         {

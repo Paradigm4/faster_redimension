@@ -31,6 +31,123 @@
 namespace scidb
 {
 
+namespace faster_redimension
+{
+
+template <ArrayReadMode MODE>
+class TupleDelegateArray : public SinglePassArray
+{
+private:
+    typedef SinglePassArray super;
+    size_t _rowIndex;
+    Address _chunkAddressAtt0;
+    Address _chunkAddressAtt1;
+    Coordinates _posBuf;
+    MemChunk _dataChunk;
+    MemChunk _ebmChunk;
+    std::weak_ptr<Query> _query;
+    size_t const _chunkSize;
+    ArrayReader<MODE> _reader;
+    size_t const _chunkSizeLimit;
+    Value _boolTrue;
+
+public:
+    TupleDelegateArray(shared_ptr<Array> & input, Settings const& settings, shared_ptr<Query>& query):
+        super(settings.makeTupledSchema(query)),
+        _rowIndex(0),
+        _chunkAddressAtt0(0, Coordinates(3,0)),
+        _chunkAddressAtt1(1, Coordinates(3,0)),
+        _posBuf(3,0),
+        _query(query),
+        _chunkSize(settings.getTupledChunkSize()),
+        _reader(input, settings),
+        _chunkSizeLimit(MODE == READ_INPUT ? settings.getSortChunkSizeLimit() : settings.getSgChunkSizeLimit())
+    {
+        super::setEnforceHorizontalIteration(true);
+        _chunkAddressAtt0.coords[0] -= _chunkSize;
+        _chunkAddressAtt0.coords[2] = query->getInstanceID();
+        _chunkAddressAtt1.coords[0] -= _chunkSize;
+        _chunkAddressAtt1.coords[2] = query->getInstanceID();
+        _boolTrue.setBool(true);
+        if(!_reader.end() && MODE==READ_TUPLED)
+        {
+            _chunkAddressAtt0.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+            _chunkAddressAtt1.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+        }
+    }
+
+    size_t getCurrentRowIndex() const
+    {
+        return _rowIndex;
+    }
+
+    bool moveNext(size_t rowIndex)
+    {
+        if(_reader.end())
+        {
+            return false;
+        }
+        _chunkAddressAtt0.coords[0]+= _chunkSize;
+        _chunkAddressAtt1.coords[0]+= _chunkSize;
+        _dataChunk.initialize(this, &super::getArrayDesc(), _chunkAddressAtt0, 0);
+        _posBuf = _chunkAddressAtt0.coords;
+        Coordinate const limit = _posBuf[0] + _chunkSize;
+        size_t numCells =0;
+        shared_ptr<ChunkIterator> citer;
+        citer = _dataChunk.getIterator(_query.lock(), ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK);
+        size_t totalSize = 0;
+        while(!_reader.end() && _posBuf[0]<limit && totalSize < _chunkSizeLimit &&
+               (MODE==READ_INPUT || RedimTuple::getInstanceId(_reader.getTuple()) == _chunkAddressAtt0.coords[1]))
+        {
+            Value const* tuple = _reader.getTuple();
+            totalSize += tuple->size() + sizeof(Value);
+            citer->setPosition(_posBuf);
+            citer->writeItem(*_reader.getTuple());
+            _reader.next();
+            ++numCells;
+            ++(_posBuf[0]);
+        }
+        citer->flush();
+        citer.reset();
+        _ebmChunk.initialize(this, &super::getArrayDesc(), _chunkAddressAtt1, 0);
+        citer = _ebmChunk.getIterator(_query.lock(), ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK);
+        _posBuf = _chunkAddressAtt1.coords;
+        while(numCells>0)
+        {
+            citer->setPosition(_posBuf);
+            citer->writeItem(_boolTrue);
+            --numCells;
+            ++(_posBuf[0]);
+        }
+        ++_rowIndex;
+        citer->flush();
+        _dataChunk.setBitmapChunk(&_ebmChunk);
+        if(!_reader.end() && MODE==READ_TUPLED && RedimTuple::getInstanceId(_reader.getTuple()) != _chunkAddressAtt0.coords[1])
+        {
+            _chunkAddressAtt0.coords[0] = 0 - _chunkSize;
+            _chunkAddressAtt0.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+            _chunkAddressAtt1.coords[0] = 0 - _chunkSize;
+            _chunkAddressAtt1.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
+        }
+        return true;
+    }
+
+    ConstChunk const& getChunk(AttributeID attr, size_t rowIndex)
+    {
+        if(attr==0)
+        {
+            return _dataChunk;
+        }
+        else if(attr == 1)
+        {
+            return _ebmChunk;
+        }
+        throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "internal inconsistency";
+    }
+};
+
+}
+
 using namespace std;
 using namespace faster_redimension;
 
@@ -71,15 +188,11 @@ public:
 
     shared_ptr<Array> sortArray(shared_ptr<Array> & tupledArray, shared_ptr<Query>& query, Settings const& settings)
     {
-        arena::ArenaPtr sortArena = _arena;
-        if(Config::getInstance()->getOption<int>(CONFIG_RESULT_PREFETCH_QUEUE_SIZE) == 1)
-        {
-            arena::Options options;
-            options.name  ("FR sort");
-            options.parent(_arena);
-            options.threading(false);
-            sortArena = arena::newArena(options);
-        }
+        arena::Options options;
+        options.name  ("FR sort");
+        options.parent(_arena);
+        options.threading(false);
+        arena::ArenaPtr sortArena = arena::newArena(options);
         SortingAttributeInfos sortingAttributeInfos(1);
         sortingAttributeInfos[0].columnNo = 0;
         sortingAttributeInfos[0].ascent = true;
@@ -156,10 +269,12 @@ public:
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
         Settings settings(inputSchema, _schema, query);
         shared_ptr<Array>& inputArray = inputArrays[0];
-        inputArray = arrayPass<READ_INPUT, WRITE_TUPLED>            (inputArray, query, settings);
+        //inputArray = arrayPass<READ_INPUT, WRITE_TUPLED>            (inputArray, query, settings);
+        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_INPUT>(inputArray,settings, query));
         inputArray = sortArray(inputArray, query, settings);
-        inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
-        inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, true);
+        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_TUPLED>(inputArray,settings, query));
+//        inputArray = arrayPass<READ_TUPLED, WRITE_SPLIT_ON_INSTANCE>(inputArray, query, settings);
+        inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, false);
 //        inputArray = sortArray(inputArray, query, settings);
 //        return arrayPass<READ_TUPLED, WRITE_OUTPUT>(inputArray, query, settings);
         return globalMerge(inputArray, query, settings);

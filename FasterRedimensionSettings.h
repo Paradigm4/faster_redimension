@@ -64,6 +64,8 @@ private:
     size_t const                  _numOutputDims;
     size_t const                  _tupledArrayChunkSize;
     size_t const                  _numInstances;
+    size_t const                  _sortChunkSizeLimit;
+    size_t const                  _sgChunkSizeLimit;
     HashedArrayDistribution const _distribution;
     ArrayCoordinatesMapper  const _mapper;
     size_t                        _numInputAttributesRead;
@@ -89,8 +91,10 @@ public:
         _numInputDims(_inputSchema.getDimensions().size()),
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
-        _tupledArrayChunkSize( 10000),
+        _tupledArrayChunkSize( 100000),
         _numInstances(query->getInstancesCount()),
+        _sortChunkSizeLimit(Config::getInstance()->getOption<int>(CONFIG_MERGE_SORT_BUFFER) * 1024 * 1024),
+        _sgChunkSizeLimit(_sortChunkSizeLimit / _numInstances),
         _distribution(0,""),
         _mapper(outputSchema.getDimensions()),
         _numInputAttributesRead(0),
@@ -288,6 +292,16 @@ public:
     vector<bool> const& outputAttributeNullable() const
     {
         return _outputAttributeNullable;
+    }
+
+    size_t getSortChunkSizeLimit() const
+    {
+        return _sortChunkSizeLimit;
+    }
+
+    size_t getSgChunkSizeLimit() const
+    {
+        return _sgChunkSizeLimit;
     }
 
     ArrayDesc makeTupledSchema(shared_ptr<Query> const& query) const
