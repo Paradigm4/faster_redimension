@@ -62,10 +62,7 @@ private:
     size_t const                  _numInputDims;
     size_t const                  _numOutputAttrs; //minus empty tag
     size_t const                  _numOutputDims;
-    size_t const                  _tupledArrayChunkSize;
     size_t const                  _numInstances;
-    size_t const                  _sortChunkSizeLimit;
-    size_t const                  _sgChunkSizeLimit;
     HashedArrayDistribution const _distribution;
     ArrayCoordinatesMapper  const _mapper;
     size_t                        _numInputAttributesRead;
@@ -77,6 +74,10 @@ private:
     vector<size_t>                _inputDimensionDestinations;
     vector<size_t>                _outputAttributeSizes;
     vector<bool>                  _outputAttributeNullable;
+    size_t                        _estTupleSizeBytes;
+    size_t                        _sortedArrayChunkSize;
+    size_t                        _sortChunkSizeLimitBytes;
+    size_t                        _sgChunkSizeLimitBytes;
 
 
 public:
@@ -91,10 +92,7 @@ public:
         _numInputDims(_inputSchema.getDimensions().size()),
         _numOutputAttrs(_outputSchema.getAttributes(true).size()),
         _numOutputDims(_outputSchema.getDimensions().size()),
-        _tupledArrayChunkSize( 1000000),
         _numInstances(query->getInstancesCount()),
-        _sortChunkSizeLimit(Config::getInstance()->getOption<int>(CONFIG_MERGE_SORT_BUFFER) * 1024 * 1024),
-        _sgChunkSizeLimit(_sortChunkSizeLimit / _numInstances),
         _distribution(0,""),
         _mapper(outputSchema.getDimensions()),
         _numInputAttributesRead(0),
@@ -108,7 +106,9 @@ public:
         _outputAttributeNullable(_numOutputAttrs)
     {
         mapInputToOutput();
+        computeChunkSizes();
         logSettings();
+
     }
 
 private:
@@ -186,6 +186,31 @@ private:
         }
     }
 
+    void computeChunkSizes()
+    {
+        _estTupleSizeBytes = computeApproximateTupleSize();
+        _sortedArrayChunkSize = (8 * 1024 * 1024) / _estTupleSizeBytes;
+        if(_sortedArrayChunkSize < 10)
+        {
+            _sortedArrayChunkSize = 10;
+        }
+        size_t const mergeSortBuf = (Config::getInstance()->getOption<int>(CONFIG_MERGE_SORT_BUFFER) * 1024 * 1024);
+        _sortChunkSizeLimitBytes = mergeSortBuf / 8;
+        _sgChunkSizeLimitBytes = mergeSortBuf / _numInstances;
+        if (_sortChunkSizeLimitBytes < 128 * 1024)
+        {
+            _sortChunkSizeLimitBytes = 128*1024;
+        }
+        if(_sgChunkSizeLimitBytes > 8 * 1024 * 1024)
+        {
+            _sgChunkSizeLimitBytes = 8 * 1024 * 1024;
+        }
+        else if (_sgChunkSizeLimitBytes < 128 * 1024)
+        {
+            _sgChunkSizeLimitBytes = 128*1024;
+        }
+    }
+
     void logSettings()
     {
         ostringstream output;
@@ -199,7 +224,7 @@ private:
         {
             output<<_inputDimensionsRead[i]<<" -> "<<_inputDimensionDestinations[i]<<" ";
         }
-        output<<" tchunk "<<_tupledArrayChunkSize;
+        output<<" sorted_array_chunk_size="<<_sortedArrayChunkSize<<" sort_chunk_limit_bytes="<<_sortChunkSizeLimitBytes<<" sg_chunk_limit_bytes="<<_sgChunkSizeLimitBytes;
         LOG4CXX_DEBUG(logger, "FR tuple mapping "<<output.str().c_str());
     }
 
@@ -224,9 +249,9 @@ public:
         return _numOutputDims;
     }
 
-    size_t getTupledChunkSize() const
+    size_t getSortedArrayChunkSize() const
     {
-        return _tupledArrayChunkSize;
+        return _sortedArrayChunkSize;
     }
 
     size_t getNumInputAttributesRead() const
@@ -296,12 +321,12 @@ public:
 
     size_t getSortChunkSizeLimit() const
     {
-        return _sortChunkSizeLimit;
+        return _sortChunkSizeLimitBytes;
     }
 
     size_t getSgChunkSizeLimit() const
     {
-        return _sgChunkSizeLimit;
+        return _sgChunkSizeLimitBytes;
     }
 
     size_t computeApproximateTupleSize() const
@@ -326,26 +351,13 @@ public:
         return result;
     }
 
-    ArrayDesc makeTupledSchema(shared_ptr<Query> const& query, bool includeApproximateTupleSize = false) const
-    {
-        Attributes outputAttributes(1);
-        outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0, std::set<std::string>(), NULL, std::string(),
-                                            includeApproximateTupleSize ? computeApproximateTupleSize() : 0);
-        outputAttributes = addEmptyTagAttribute(outputAttributes);
-        Dimensions outputDimensions;
-        outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
-        outputDimensions.push_back(DimensionDesc("dst_instance_id", 0, _numInstances-1,                           1,                       0));
-        outputDimensions.push_back(DimensionDesc("src_instance_id", 0, _numInstances-1,                           1,                       0));
-        return ArrayDesc("redimension_state" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
-    }
-
     ArrayDesc makePreSortSchema(shared_ptr<Query> const& query, bool includeApproximateTupleSize = false) const
     {
         Attributes outputAttributes(1);
         outputAttributes[0] = AttributeDesc(0, "tuple", "redimension_tuple", 0,0, std::set<std::string>(), NULL, std::string(),
-                                            includeApproximateTupleSize ? computeApproximateTupleSize() : 0);
+                                            includeApproximateTupleSize ? _estTupleSizeBytes : 0);
         Dimensions outputDimensions;
-        outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _tupledArrayChunkSize,  0));
+        outputDimensions.push_back(DimensionDesc("value_no",        0,  CoordinateBounds::getMax(),               _sortedArrayChunkSize,  0));
         return ArrayDesc("redimension_presort" , outputAttributes, outputDimensions, defaultPartitioning(), query->getDefaultArrayResidency());
     }
 

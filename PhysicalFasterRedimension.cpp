@@ -35,133 +35,31 @@ namespace scidb
 namespace faster_redimension
 {
 
-template <ArrayReadMode MODE>
-class TupleDelegateArray : public SinglePassArray
-{
-private:
-    typedef SinglePassArray super;
-    size_t _rowIndex;
-    Address _chunkAddressAtt0;
-    Address _chunkAddressAtt1;
-    Coordinates _posBuf;
-    MemChunk _dataChunk;
-    MemChunk _ebmChunk;
-    std::weak_ptr<Query> _query;
-    size_t const _chunkSize;
-    ArrayReader<MODE> _reader;
-    size_t const _chunkSizeLimit;
-    Value _boolTrue;
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-public:
-    TupleDelegateArray(shared_ptr<Array> & input, Settings const& settings, shared_ptr<Query>& query):
-        super(settings.makeTupledSchema(query)),
-        _rowIndex(0),
-        _chunkAddressAtt0(0, Coordinates(3,0)),
-        _chunkAddressAtt1(1, Coordinates(3,0)),
-        _posBuf(3,0),
-        _query(query),
-        _chunkSize(settings.getTupledChunkSize()),
-        _reader(input, settings),
-        _chunkSizeLimit(MODE == READ_INPUT ? settings.getSortChunkSizeLimit() : settings.getSgChunkSizeLimit())
-    {
-        super::setEnforceHorizontalIteration(true);
-        _chunkAddressAtt0.coords[0] -= _chunkSize;
-        _chunkAddressAtt0.coords[2] = query->getInstanceID();
-        _chunkAddressAtt1.coords[0] -= _chunkSize;
-        _chunkAddressAtt1.coords[2] = query->getInstanceID();
-        _boolTrue.setBool(true);
-        if(!_reader.end() && MODE==READ_TUPLED)
-        {
-            _chunkAddressAtt0.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
-            _chunkAddressAtt1.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
-        }
-    }
-
-    size_t getCurrentRowIndex() const
-    {
-        return _rowIndex;
-    }
-
-    bool moveNext(size_t rowIndex)
-    {
-        if(_reader.end())
-        {
-            return false;
-        }
-        _chunkAddressAtt0.coords[0]+= _chunkSize;
-        _chunkAddressAtt1.coords[0]+= _chunkSize;
-        _dataChunk.initialize(this, &super::getArrayDesc(), _chunkAddressAtt0, 0);
-        _posBuf = _chunkAddressAtt0.coords;
-        Coordinate const limit = _posBuf[0] + _chunkSize;
-        size_t numCells =0;
-        shared_ptr<ChunkIterator> citer;
-        citer = _dataChunk.getIterator(_query.lock(), ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK);
-        size_t totalSize = 0;
-        while(!_reader.end() && _posBuf[0]<limit && totalSize < _chunkSizeLimit &&
-               (MODE==READ_INPUT || RedimTuple::getInstanceId(_reader.getTuple()) == _chunkAddressAtt0.coords[1]))
-        {
-            Value const* tuple = _reader.getTuple();
-            totalSize += tuple->size() + sizeof(Value);
-            citer->setPosition(_posBuf);
-            citer->writeItem(*_reader.getTuple());
-            _reader.next();
-            ++numCells;
-            ++(_posBuf[0]);
-        }
-        citer->flush();
-        citer.reset();
-        _ebmChunk.initialize(this, &super::getArrayDesc(), _chunkAddressAtt1, 0);
-        citer = _ebmChunk.getIterator(_query.lock(), ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK);
-        _posBuf = _chunkAddressAtt1.coords;
-        while(numCells>0)
-        {
-            citer->setPosition(_posBuf);
-            citer->writeItem(_boolTrue);
-            --numCells;
-            ++(_posBuf[0]);
-        }
-        ++_rowIndex;
-        citer->flush();
-        _dataChunk.setBitmapChunk(&_ebmChunk);
-        if(!_reader.end() && MODE==READ_TUPLED && RedimTuple::getInstanceId(_reader.getTuple()) != _chunkAddressAtt0.coords[1])
-        {
-            _chunkAddressAtt0.coords[0] = 0 - _chunkSize;
-            _chunkAddressAtt0.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
-            _chunkAddressAtt1.coords[0] = 0 - _chunkSize;
-            _chunkAddressAtt1.coords[1] = RedimTuple::getInstanceId(_reader.getTuple());
-        }
-        return true;
-    }
-
-    ConstChunk const& getChunk(AttributeID attr, size_t rowIndex)
-    {
-        if(attr==0)
-        {
-            return _dataChunk;
-        }
-        else if(attr == 1)
-        {
-            return _ebmChunk;
-        }
-        throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "internal inconsistency";
-    }
-};
-
-
+/*
+ * This is a delegate-style array for reading the input into the sort. It wraps around ArrayReader<READ_INPUT>
+ * and only implements the methods that the sort needs. It also makes sure no chunk passed to sort exceeds
+ * a binary size limit. Written out upside-down.
+ * InputScannerChunkIterator
+ * InputScannerChunk
+ * InputScannerArrayIterator
+ * InputScannerArray
+ */
 class InputScannerChunkIterator : public ConstChunkIterator
 {
 private:
     ArrayReader<READ_INPUT>& _reader;
-    size_t const _cellsPerChunkLimit;
     size_t const _binaryChunkSizeLimit;
     size_t _cellsRead;
     size_t _bytesRead;
     Coordinates _pos;
 
 public:
-    InputScannerChunkIterator(ArrayReader<READ_INPUT>& reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+    InputScannerChunkIterator(ArrayReader<READ_INPUT>& reader, size_t binaryChunkSizeLimit):
         _reader(reader),
-        _cellsPerChunkLimit(cellsPerChunkLimit),
         _binaryChunkSizeLimit(binaryChunkSizeLimit),
         _cellsRead(0),
         _bytesRead(0),
@@ -187,11 +85,12 @@ public:
 
     virtual bool end()
     {
-        return _reader.end() || _cellsRead >= _cellsPerChunkLimit || _bytesRead >= _binaryChunkSizeLimit;
+        return _reader.end() || _bytesRead >= _binaryChunkSizeLimit;
     }
 
     virtual Coordinates const& getPosition()
     {
+        //XXX:Sorter calls this but doesn't use it for anything
         return _pos;
     }
 
@@ -206,19 +105,17 @@ class InputScannerChunk : public ConstChunk
 {
 private:
     ArrayReader<READ_INPUT>& _reader;
-    size_t const _cellsPerChunkLimit;
     size_t const _binaryChunkSizeLimit;
 
 public:
-    InputScannerChunk(ArrayReader<READ_INPUT>&  reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+    InputScannerChunk(ArrayReader<READ_INPUT>&  reader, size_t binaryChunkSizeLimit):
         _reader(reader),
-        _cellsPerChunkLimit(cellsPerChunkLimit),
         _binaryChunkSizeLimit(binaryChunkSizeLimit)
     {}
 
     virtual shared_ptr<ConstChunkIterator> getConstIterator(int iterationMode) const
     {
-        return shared_ptr<ConstChunkIterator>(new InputScannerChunkIterator(_reader, _cellsPerChunkLimit, _binaryChunkSizeLimit));
+        return shared_ptr<ConstChunkIterator>(new InputScannerChunkIterator(_reader, _binaryChunkSizeLimit));
     }
 
     virtual const ArrayDesc& getArrayDesc() const                              { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getArrayDesc call"; }
@@ -229,22 +126,19 @@ public:
     virtual Array const& getArray() const                                      { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunk getArray call"; }
 };
 
-
 class InputScannerArrayIterator : public ConstArrayIterator
 {
 private:
     ArrayReader<READ_INPUT>& _reader;
     InputScannerChunk _chunk;
     Coordinates _pos;
-    size_t const _cellsPerChunkLimit;
     size_t const _binaryChunkSizeLimit;
 
 public:
-    InputScannerArrayIterator(ArrayReader<READ_INPUT>& reader, size_t cellsPerChunkLimit, size_t binaryChunkSizeLimit):
+    InputScannerArrayIterator(ArrayReader<READ_INPUT>& reader, size_t binaryChunkSizeLimit):
         _reader(reader),
-        _chunk(_reader, cellsPerChunkLimit, binaryChunkSizeLimit),
+        _chunk(_reader, binaryChunkSizeLimit),
         _pos(1,0),
-        _cellsPerChunkLimit(cellsPerChunkLimit),
         _binaryChunkSizeLimit(binaryChunkSizeLimit)
     {}
 
@@ -263,6 +157,7 @@ public:
 
     virtual Coordinates const& getPosition()
     {
+        //XXX:Sorter calls this but doesn't use it for anything
         return _pos;
     }
 
@@ -275,14 +170,12 @@ class InputScannerArray : public Array
 private:
     ArrayDesc _desc;
     mutable ArrayReader<READ_INPUT> _reader;
-    size_t const _cellsPerChunkLimit;
     size_t const _binaryChunkSizeLimit;
 
 public:
     InputScannerArray(shared_ptr<Array>& inputArray, Settings const& settings,  shared_ptr<Query>& query):
         _desc(settings.makePreSortSchema(query)),
         _reader(inputArray, settings),
-        _cellsPerChunkLimit(settings.getTupledChunkSize()),
         _binaryChunkSizeLimit(settings.getSortChunkSizeLimit())
     {}
 
@@ -298,14 +191,20 @@ public:
 
     virtual std::shared_ptr<ConstArrayIterator> getConstIterator(AttributeID attr) const
     {
-        return shared_ptr<ConstArrayIterator>(new InputScannerArrayIterator(_reader, _cellsPerChunkLimit, _binaryChunkSizeLimit));
+        return shared_ptr<ConstArrayIterator>(new InputScannerArrayIterator(_reader, _binaryChunkSizeLimit));
     }
 };
 
-///
-///
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+ * Now, to avoid excessive chunkIterator::writeItem calls we pack the RedimensionTuples into large binary blobs:
+ * [uint32 size][tuple][uint32 size][tuple]...[uint32 size][tuple][uint32 0]
+ * Note the use of 0 as the terminator.
+ */
 
-
+//Distance between chunk start and the data region (for a chunk with a single binary blob)
 static size_t getChunkOverheadSize()
 {
     return             (  sizeof(ConstRLEPayload::Header) +
@@ -313,11 +212,15 @@ static size_t getChunkOverheadSize()
                                  sizeof(varpart_offset_t) + 5);
 }
 
+//Distance between chunk start and the size pointer (for a chunk with a single binary blob)
 static size_t getSizeOffset()
 {
     return getChunkOverheadSize()-4;
 }
 
+/*
+ * Wrap around ArrayReader<READ_TUPLED> and output the sg schema chunks with tuples packed into blobs - ready for SG.
+ */
 class TupleSgArray : public SinglePassArray
 {
 private:
@@ -411,7 +314,7 @@ public:
         }
         if(dataSize == 0)
         {
-            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "tuples too large for chunks; raise the (merge-sort-buffer) memory limit";
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "tuples too large for chunks; raise the memory limit";
         }
         else
         {
@@ -439,7 +342,10 @@ public:
     }
 };
 
-class TupleUnpacker
+/*
+ * Wrap around a single chunk out of the SG and pull tuples out of it.
+ */
+class ChunkTupleUnpacker
 {
 private:
     size_t const _overheadSize;
@@ -449,14 +355,14 @@ private:
     Value _tupleBuf;
 
 public:
-    TupleUnpacker():
+    ChunkTupleUnpacker():
         _overheadSize(getChunkOverheadSize()),
         _sizeOffset(getSizeOffset()),
         _chunkPtr(0),
         _readPtr(0)
     {}
 
-    ~TupleUnpacker()
+    ~ChunkTupleUnpacker()
     {
         if(_chunkPtr)
         {
@@ -485,7 +391,6 @@ public:
         {
             throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "[defensive] encountered a chunk with the first zero tuple.";
         }
-        //_tupleBuf.setSize(tupleSize);
         ++tupleSizePtr;
         _readPtr = reinterpret_cast<char*> (tupleSizePtr);
         _tupleBuf.setData(_readPtr, tupleSize);
@@ -519,7 +424,7 @@ public:
 
     bool end()
     {
-        return (_chunkPtr == 0);
+        return (_chunkPtr == NULL);
     }
 
     void clear()
@@ -559,19 +464,6 @@ public:
         return RedistributeContext(createDistribution(psUndefined), _schema.getResidency() );
     }
 
-    template<ArrayReadMode READ_MODE, ArrayWriteMode WRITE_MODE>
-    shared_ptr<Array> arrayPass(shared_ptr<Array>& data, shared_ptr<Query>& query, Settings const& settings)
-    {
-        ArrayReader<READ_MODE> reader(data, settings);
-        ArrayWriter<WRITE_MODE> writer(settings, query);
-        while(!reader.end())
-        {
-            writer.writeTuple(reader.getTuple());
-            reader.next();
-        }
-        return writer.finalize();
-    }
-
     shared_ptr<Array> sortArray(shared_ptr<Array> & tupledArray, shared_ptr<Query>& query, Settings const& settings)
     {
         arena::Options options;
@@ -582,81 +474,17 @@ public:
         SortingAttributeInfos sortingAttributeInfos(1);
         sortingAttributeInfos[0].columnNo = 0;
         sortingAttributeInfos[0].ascent = true;
-        SortArray sorter(settings.makePreSortSchema(query, true), sortArena, false, settings.getTupledChunkSize());
+        SortArray sorter(settings.makePreSortSchema(query, true), sortArena, false, settings.getSortedArrayChunkSize());
         shared_ptr<TupleComparator> tcomp(make_shared<TupleComparator>(sortingAttributeInfos, tupledArray->getArrayDesc()));
         return sorter.getSortedArray(tupledArray, query, tcomp);
     }
 
     shared_ptr<Array> globalMerge(shared_ptr<Array>& tupled, shared_ptr<Query>& query, Settings const& settings)
     {
-        ArrayWriter<WRITE_OUTPUT> output(settings, query);
+        OutputWriter output(settings, query);
         size_t const numInstances = query->getInstancesCount();
         vector<shared_ptr<ConstArrayIterator> > aiters(numInstances);
-        vector<shared_ptr<ConstChunkIterator> > citers(numInstances);
-        vector<Coordinates > positions(numInstances);
-        size_t numClosed = 0;
-        for(size_t inst =0; inst<numInstances; ++inst)
-        {
-            positions[inst].resize(3);
-            positions[inst][0] = 0;
-            positions[inst][1] = query->getInstanceID();
-            positions[inst][2] = inst;
-            aiters[inst] = tupled->getConstIterator(0);
-            if(!aiters[inst]->setPosition(positions[inst]))
-            {
-                aiters[inst].reset();
-                citers[inst].reset();
-                numClosed++;
-            }
-            else
-            {
-                citers[inst] = aiters[inst]->getChunk().getConstIterator();
-            }
-        }
-        while(numClosed < numInstances)
-        {
-            Value const* minTuple = NULL;
-            size_t toAdvance;
-            for(size_t inst=0; inst<numInstances; ++inst)
-            {
-                if(citers[inst] == 0)
-                {
-                    continue;
-                }
-                Value const* tuple = &(citers[inst]->getItem());
-                if(minTuple == NULL || RedimTuple::redimTupleLess(tuple, minTuple))
-                {
-                    minTuple = tuple;
-                    toAdvance=inst;
-                }
-            }
-            output.writeTuple(minTuple);
-            ++(*citers[toAdvance]);
-            if(citers[toAdvance]->end())
-            {
-                positions[toAdvance][0] = positions[toAdvance][0] + settings.getTupledChunkSize();
-                if(!aiters[toAdvance]->setPosition(positions[toAdvance]))
-                {
-                    aiters[toAdvance].reset();
-                    citers[toAdvance].reset();
-                    numClosed++;
-                }
-                else
-                {
-                    citers[toAdvance] = aiters[toAdvance]->getChunk().getConstIterator();
-                }
-            }
-        }
-        return output.finalize();
-    }
-
-
-    shared_ptr<Array> globalMergeAuga(shared_ptr<Array>& tupled, shared_ptr<Query>& query, Settings const& settings)
-    {
-        ArrayWriter<WRITE_OUTPUT> output(settings, query);
-        size_t const numInstances = query->getInstancesCount();
-        vector<shared_ptr<ConstArrayIterator> > aiters(numInstances);
-        vector<TupleUnpacker> unpackers(numInstances);
+        vector<ChunkTupleUnpacker> unpackers(numInstances);
         vector<Coordinates > positions(numInstances);
         size_t numClosed = 0;
         for(size_t inst =0; inst<numInstances; ++inst)
@@ -719,16 +547,11 @@ public:
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
         Settings settings(inputSchema, _schema, query);
         shared_ptr<Array>& inputArray = inputArrays[0];
-
-        //inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_INPUT>(inputArray,settings, query));
         inputArray = shared_ptr<Array>(new InputScannerArray(inputArray,settings, query));
         inputArray = sortArray(inputArray, query, settings);
-
-//        inputArray = shared_ptr<Array>(new TupleDelegateArray<READ_TUPLED>(inputArray,settings, query));
-
         inputArray = shared_ptr<Array>(new TupleSgArray(inputArray,settings, query));
         inputArray = redistributeToRandomAccess(inputArray, createDistribution(psByCol),query->getDefaultArrayResidency(), query, false);
-        return globalMergeAuga(inputArray, query, settings);
+        return globalMerge(inputArray, query, settings);
     }
 };
 

@@ -35,13 +35,20 @@ namespace scidb
 namespace faster_redimension
 {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+ * This pulls values out of the input array and converts them to tuples. It is used twice:
+ *  - reading input prior to sort
+ *  - reading sorted array into sg
+ */
 enum ArrayReadMode
 {
     READ_INPUT,          //we're reading the input array, however it may be; we reorder attributes and convert dimensions to tuple if needed;
                          //here we filter dimensions for nulls
     READ_TUPLED,         //we're reading an array that's been tupled
 };
-
 template<ArrayReadMode MODE>
 class ArrayReader
 {
@@ -225,16 +232,13 @@ public:
     }
 };
 
-
-enum ArrayWriteMode
-{
-    WRITE_TUPLED,
-    WRITE_SPLIT_ON_INSTANCE,
-    WRITE_OUTPUT
-};
-
-template<ArrayWriteMode MODE>
-class ArrayWriter : public boost::noncopyable
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*
+ * Writes out the output array
+ */
+class OutputWriter : public boost::noncopyable
 {
 private:
     shared_ptr<Array>                   _output;
@@ -256,85 +260,60 @@ private:
     Value                               _boolTrue;
 
 public:
-    ArrayWriter(Settings const& settings, shared_ptr<Query> const& query):
-        _output               (std::make_shared<MemArray>( MODE==WRITE_OUTPUT ? settings.getOutputSchema() : settings.makeTupledSchema(query), query)),
+    OutputWriter(Settings const& settings, shared_ptr<Query> const& query):
+        _output               (std::make_shared<MemArray>(settings.getOutputSchema(), query)),
         _myInstanceId         (query->getInstanceID()),
         _numInstances         (query->getInstancesCount()),
         _numAttributes        (_output->getArrayDesc().getAttributes(true).size()),
         _numTupleDimensions   (settings.getNumOutputDims()),
-        _chunkSize            (settings.getTupledChunkSize()),
+        _chunkSize            (settings.getSortedArrayChunkSize()),
         _query                (query),
         _settings             (settings),
-        _outputChunkPosition     ( MODE == WRITE_OUTPUT ? 0 : 3, 0),
-        _outputPosition          ( MODE == WRITE_OUTPUT ? 0 : 3, 0),
-        _outputChunkPositionBuf  ( MODE == WRITE_OUTPUT ? _output->getArrayDesc().getDimensions().size() : 0, 0),
-        _outputPositionBuf       ( MODE == WRITE_OUTPUT ? _output->getArrayDesc().getDimensions().size() : 0, 0),
+        _outputChunkPosition     ( 0),
+        _outputPosition          ( 0),
+        _outputChunkPositionBuf  (_output->getArrayDesc().getDimensions().size(), 0),
+        _outputPositionBuf       (_output->getArrayDesc().getDimensions().size(), 0),
         _arrayIterators       (_numAttributes+1, NULL),
         _chunkIterators       (_numAttributes+1, NULL),
-        _currentDstInstanceId (0),
-        _outputValues         (MODE == WRITE_OUTPUT ? _settings.getNumOutputAttrs() : 0)
+        _outputValues         (_settings.getNumOutputAttrs())
     {
         _boolTrue.setBool(true);
         for(size_t i =0; i<_numAttributes+1; ++i)
         {
             _arrayIterators[i] = _output->getIterator(i);
         }
-        if (MODE != WRITE_OUTPUT)
-        {
-            _outputPosition[2] = _myInstanceId;
-        }
     }
 
     void writeTuple(Value const* tuple)
     {
         bool newChunk = false;
-        if(MODE == WRITE_SPLIT_ON_INSTANCE)
+        uint32_t dstInstanceId;
+        position_t cellPos;
+        RedimTuple::decomposeTuple(_settings.getNumOutputDims(),
+                                    _settings.getNumOutputAttrs(),
+                                    _settings.outputAttributeNullable(),
+                                    _settings.getOutputAttributeSizes(),
+                                    tuple,
+                                    dstInstanceId,
+                                    _outputChunkPositionBuf,
+                                    cellPos,
+                                    _outputValues);
+        _settings.getOutputCellCoords(_outputChunkPositionBuf, cellPos, _outputPositionBuf);
+        if(_outputChunkPosition.size() == 0) //first one!
         {
-            uint32_t dstInstanceId = RedimTuple::getInstanceId(tuple);
-            if(dstInstanceId != _currentDstInstanceId)
-            {
-                _currentDstInstanceId = dstInstanceId;
-                _outputPosition[0] = 0;
-                _outputPosition[1] = _currentDstInstanceId;
-                _outputChunkPosition = _outputPosition;
-                newChunk = true;
-            }
-        }
-        if (MODE != WRITE_OUTPUT && _outputPosition[0] % _chunkSize == 0)
-        {
-            _outputChunkPosition = _outputPosition;
+            _outputChunkPosition = _outputChunkPositionBuf;
             newChunk = true;
         }
-        else if (MODE == WRITE_OUTPUT)
+        else if(_outputChunkPositionBuf != _outputChunkPosition)
         {
-            uint32_t dstInstanceId;
-            position_t cellPos;
-            RedimTuple::decomposeTuple(_settings.getNumOutputDims(),
-                                       _settings.getNumOutputAttrs(),
-                                       _settings.outputAttributeNullable(),
-                                       _settings.getOutputAttributeSizes(),
-                                       tuple,
-                                       dstInstanceId,
-                                       _outputChunkPositionBuf,
-                                       cellPos,
-                                       _outputValues);
-            _settings.getOutputCellCoords(_outputChunkPositionBuf, cellPos, _outputPositionBuf);
-            if(_outputChunkPosition.size() == 0) //first one!
-            {
-                _outputChunkPosition = _outputChunkPositionBuf;
-                newChunk = true;
-            }
-            else if(_outputChunkPositionBuf != _outputChunkPosition)
-            {
-                _outputChunkPosition = _outputChunkPositionBuf;
-                newChunk = true;
-            }
-            else if(_outputPositionBuf == _outputPosition)
-            {
-                throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "Data collision";
-            }
-            _outputPosition = _outputPositionBuf;
+            _outputChunkPosition = _outputChunkPositionBuf;
+            newChunk = true;
         }
+        else if(_outputPositionBuf == _outputPosition)
+        {
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "Data collision";
+        }
+        _outputPosition = _outputPositionBuf;
         if( newChunk )
         {
             for(size_t i=0; i<_numAttributes+1; ++i)
@@ -346,25 +325,13 @@ public:
                 _chunkIterators[i] = _arrayIterators[i]->newChunk(_outputChunkPosition).getIterator(_query, ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK );
             }
         }
-        if(MODE==WRITE_OUTPUT)
+        for(size_t i=0; i<_numAttributes; ++i)
         {
-            for(size_t i=0; i<_numAttributes; ++i)
-            {
-                _chunkIterators[i]->setPosition(_outputPosition);
-                _chunkIterators[i]->writeItem(_outputValues[i]);
-            }
-        }
-        else
-        {
-            _chunkIterators[0]->setPosition(_outputPosition);
-            _chunkIterators[0]->writeItem(*tuple);
+            _chunkIterators[i]->setPosition(_outputPosition);
+            _chunkIterators[i]->writeItem(_outputValues[i]);
         }
         _chunkIterators[_numAttributes]->setPosition(_outputPosition);
         _chunkIterators[_numAttributes]->writeItem(_boolTrue);
-        if(MODE != WRITE_OUTPUT)
-        {
-            ++_outputPosition[ 0 ];
-        }
     }
 
     shared_ptr<Array> finalize()
