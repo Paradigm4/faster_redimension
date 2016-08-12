@@ -2,7 +2,7 @@
 
 REGENERATE=0
 
-if [ $REGENERATE ] ; then
+if [ $REGENERATE -ne 0 ] ; then
 iquery -anq "remove(foo_big)" > /dev/null 2>&1
 iquery -anq "remove(foo_big_randomized)" > /dev/null 2>&1
 
@@ -33,9 +33,8 @@ iquery -anq "store(
   ),
   foo_big
  )"
+ iquery -anq "store(sort(apply(foo_big, r, random()), r, 100000), foo_big_randomized)"
 fi
-
-iquery -anq "store(sort(apply(foo_big, r, random()), r, 100000), foo_big_randomized)"
 
 echo
 echo "1 attr"
@@ -56,7 +55,7 @@ time iquery -anq "consume(redimension(foo_big,
   val6:double,val7:double,val8:double,val9:double,val10:double>
  [x=0:*,10000,0, y=0:*,10000,0]))"
 time iquery -anq "consume(faster_redimension(foo_big, 
- <val1:double,val2:double,val3:double,val4:doubl,val5:double,
+ <val1:double,val2:double,val3:double,val4:double,val5:double,
   val6:double,val7:double,val8:double,val9:double,val10:double>
  [x=0:*,10000,0, y=0:*,10000,0]))"
 echo
@@ -93,7 +92,7 @@ time iquery -anq "consume(redimension(foo_big_randomized,
   val6:double,val7:double,val8:double,val9:double,val10:double>
  [x=0:*,10000,0, y=0:*,10000,0]))"
 time iquery -anq "consume(faster_redimension(foo_big_randomized, 
- <val1:double,val2:double,val3:double,val4:doubl,val5:double,
+ <val1:double,val2:double,val3:double,val4:double,val5:double,
   val6:double,val7:double,val8:double,val9:double,val10:double>
  [x=0:*,10000,0, y=0:*,10000,0]))"
 echo
