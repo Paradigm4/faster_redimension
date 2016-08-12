@@ -30,6 +30,7 @@ namespace scidb
 {
 
 using namespace std;
+using faster_redimension::Settings;
 
 class LogicalFastRedim : public LogicalOperator
 {
@@ -39,6 +40,18 @@ public:
     {
         ADD_PARAM_INPUT();
         ADD_PARAM_SCHEMA();
+        ADD_PARAM_VARIES();
+    }
+
+    std::vector<shared_ptr<OperatorParamPlaceholder> > nextVaryParamPlaceholder(const std::vector< ArrayDesc> &schemas)
+    {
+        std::vector<shared_ptr<OperatorParamPlaceholder> > res;
+        res.push_back(END_OF_VARIES_PARAMS());
+        if (_parameters.size() < Settings::MAX_PARAMETERS)
+        {
+            res.push_back(PARAM_CONSTANT("string"));
+        }
+        return res;
     }
 
     ArrayDesc inferSchema(vector< ArrayDesc> schemas, shared_ptr< Query> query)
@@ -126,12 +139,14 @@ public:
             throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "no extraneous dimensions allowed";
         NextDim:;
         }
-        return ArrayDesc(srcDesc.getName(),
-                         dstDesc.getAttributes(),
-                         outputDims,
-                         createDistribution(psUndefined),
-                         query->getDefaultArrayResidency(),
-                         dstDesc.getFlags());
+        ArrayDesc outSchema(srcDesc.getName(),
+                            dstDesc.getAttributes(),
+                            outputDims,
+                            createDistribution(psUndefined),
+                            query->getDefaultArrayResidency(),
+                            dstDesc.getFlags());
+        Settings settings(srcDesc, outSchema, _parameters, true, query);
+        return outSchema;
     }
 };
 

@@ -75,16 +75,64 @@ private:
     vector<size_t>                _outputAttributeSizes;
     vector<bool>                  _outputAttributeNullable;
     size_t                        _estTupleSizeBytes;
+    bool                          _estTupleSizeBytesSet;
     size_t                        _sortedArrayChunkSize;
+    bool                          _sortedArrayChunkSizeSet;
     size_t                        _sortChunkSizeLimitBytes;
+    bool                          _sortChunkSizeLimitBytesSet;
     size_t                        _sgChunkSizeLimitBytes;
+    bool                          _sgChunkSizeLimitBytesSet;
 
+    static string paramToString(shared_ptr <OperatorParam> const& parameter, shared_ptr<Query>& query, bool logical)
+    {
+        if(logical)
+        {
+            return evaluate(((shared_ptr<OperatorParamLogicalExpression>&) parameter)->getExpression(),query, TID_STRING).getString();
+        }
+        return ((shared_ptr<OperatorParamPhysicalExpression>&) parameter)->getExpression()->evaluate().getString();
+    }
+
+    void setSizeParam (string const& parameterString, bool& alreadySet, string const& header, size_t& param )
+    {
+        string paramContent = parameterString.substr(header.size());
+        if (alreadySet)
+        {
+            string h = parameterString.substr(0, header.size()-1);
+            ostringstream error;
+            error<<"illegal attempt to set "<<h<<" multiple times";
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << error.str().c_str();
+        }
+        trim(paramContent);
+        int64_t content;
+        try
+        {
+            content = lexical_cast<int64_t>(paramContent);
+        }
+        catch (bad_lexical_cast const& exn)
+        {
+            string h = parameterString.substr(0, header.size()-1);
+            ostringstream error;
+            error<<"could not parse "<<h;
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << error.str().c_str();
+        }
+        if(content<=0)
+        {
+            string h = parameterString.substr(0, header.size()-1);
+            ostringstream error;
+            error<<h<<" must not be negative";
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << error.str().c_str();
+        }
+        param = content;
+        alreadySet = true;
+    }
 
 public:
-    static size_t const MAX_PARAMETERS = 11;
+    static size_t const MAX_PARAMETERS = 5; //1 for the schema
 
     Settings(ArrayDesc const& inputSchema,
              ArrayDesc const& outputSchema,
+             vector< shared_ptr<OperatorParam> > const& operatorParameters,
+             bool logical,
              shared_ptr<Query>& query):
         _inputSchema(inputSchema),
         _outputSchema(outputSchema),
@@ -103,12 +151,50 @@ public:
         _inputDimensionsRead(0),
         _inputDimensionDestinations(0),
         _outputAttributeSizes(_numOutputAttrs),
-        _outputAttributeNullable(_numOutputAttrs)
+        _outputAttributeNullable(_numOutputAttrs),
+        _estTupleSizeBytesSet(false),
+        _sortedArrayChunkSizeSet(false),
+        _sortChunkSizeLimitBytesSet(false),
+        _sgChunkSizeLimitBytesSet(false)
     {
+        string const estTupleSizeBytesHeader       = "est_tuple_size_bytes=";        //estimation on how big each tuple is (sort uses this to size the buffer to fit in memory)
+        string const sortedChunkSizeHeader         = "sorted_array_chunk_size=";     //chunk size for the output of the sort routine
+        string const sortChunkSizeLimitBytesHeader = "sort_chunk_size_limit_bytes="; //limit on chunks that are fed in to sort, not a big deal as long as it's under MERGE_SORT_BUFFER
+        string const sgChunkSizeLimitBytesHeader   = "sg_chunk_size_limit_bytes=";   //limit on the chunks that are fed in to post sort SG: a chunk from each instance should fit in memory
+        size_t const nParams = operatorParameters.size();
+        if (nParams > MAX_PARAMETERS)
+        {   //assert-like exception. Caller should have taken care of this!
+            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal number of parameters passed to faster_redimension";
+        }
+        for (size_t i= 1; i<nParams; ++i) //first param is the schema, handled elsewhere
+        {
+          string parameterString = paramToString(operatorParameters[i], query, logical);
+          if      (starts_with(parameterString, estTupleSizeBytesHeader))
+          {
+              setSizeParam(parameterString, _estTupleSizeBytesSet, estTupleSizeBytesHeader, _estTupleSizeBytes);
+          }
+          else if (starts_with(parameterString, sortedChunkSizeHeader))
+          {
+              setSizeParam(parameterString, _sortedArrayChunkSizeSet, sortedChunkSizeHeader, _sortedArrayChunkSize);
+          }
+          else if (starts_with(parameterString, sortChunkSizeLimitBytesHeader))
+          {
+              setSizeParam(parameterString, _sortChunkSizeLimitBytesSet, sortChunkSizeLimitBytesHeader, _sortChunkSizeLimitBytes);
+          }
+          else if (starts_with(parameterString, sgChunkSizeLimitBytesHeader))
+          {
+              setSizeParam(parameterString, _sgChunkSizeLimitBytesSet, sgChunkSizeLimitBytesHeader, _sgChunkSizeLimitBytes);
+          }
+          else
+          {
+              ostringstream error;
+              error<<"Unrecognized parameter "<<parameterString;
+              throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << error.str().c_str();
+          }
+        }
         mapInputToOutput();
         computeChunkSizes();
         logSettings();
-
     }
 
 private:
@@ -188,26 +274,38 @@ private:
 
     void computeChunkSizes()
     {
-        _estTupleSizeBytes = computeApproximateTupleSize();
-        _sortedArrayChunkSize = (8 * 1024 * 1024) / _estTupleSizeBytes;
-        if(_sortedArrayChunkSize < 10)
+        if(!_estTupleSizeBytesSet) //Customer's always right!
         {
-            _sortedArrayChunkSize = 10;
+            _estTupleSizeBytes = computeApproximateTupleSize();
+        }
+        if(!_sortedArrayChunkSizeSet)
+        {
+            _sortedArrayChunkSize = (10 * 1024 * 1024) / _estTupleSizeBytes;
+            if(_sortedArrayChunkSize < 10)
+            {
+                _sortedArrayChunkSize = 10;
+            }
         }
         size_t const mergeSortBuf = (Config::getInstance()->getOption<int>(CONFIG_MERGE_SORT_BUFFER) * 1024 * 1024);
-        _sortChunkSizeLimitBytes = mergeSortBuf / 8;
-        _sgChunkSizeLimitBytes = mergeSortBuf / _numInstances;
-        if (_sortChunkSizeLimitBytes < 128 * 1024)
+        if(!_sortChunkSizeLimitBytesSet)
         {
-            _sortChunkSizeLimitBytes = 128*1024;
+            _sortChunkSizeLimitBytes = mergeSortBuf / 8;
+            if (_sortChunkSizeLimitBytes < 128 * 1024)
+            {
+                _sortChunkSizeLimitBytes = 128*1024;
+            }
         }
-        if(_sgChunkSizeLimitBytes > 8 * 1024 * 1024)
+        if(!_sgChunkSizeLimitBytesSet)
         {
-            _sgChunkSizeLimitBytes = 8 * 1024 * 1024;
-        }
-        else if (_sgChunkSizeLimitBytes < 128 * 1024)
-        {
-            _sgChunkSizeLimitBytes = 128*1024;
+            _sgChunkSizeLimitBytes = mergeSortBuf / _numInstances;
+            if(_sgChunkSizeLimitBytes > 10 * 1024 * 1024) //sending messages that are too large may make things unstable
+            {
+                _sgChunkSizeLimitBytes = 10 * 1024 * 1024;
+            }
+            else if (_sgChunkSizeLimitBytes < 128 * 1024)
+            {
+                _sgChunkSizeLimitBytes = 128*1024;
+            }
         }
     }
 
@@ -224,7 +322,10 @@ private:
         {
             output<<_inputDimensionsRead[i]<<" -> "<<_inputDimensionDestinations[i]<<" ";
         }
-        output<<" sorted_array_chunk_size="<<_sortedArrayChunkSize<<" sort_chunk_limit_bytes="<<_sortChunkSizeLimitBytes<<" sg_chunk_limit_bytes="<<_sgChunkSizeLimitBytes;
+        output<<" est_tuple_size_bytes="<<_estTupleSizeBytes
+              <<" sorted_array_chunk_size="<<_sortedArrayChunkSize
+              <<" sort_chunk_size_limit_bytes="<<_sortChunkSizeLimitBytes
+              <<" sg_chunk_size_limit_bytes="<<_sgChunkSizeLimitBytes;
         LOG4CXX_DEBUG(logger, "FR tuple mapping "<<output.str().c_str());
     }
 

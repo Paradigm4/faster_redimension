@@ -545,7 +545,7 @@ public:
     shared_ptr< Array> execute(vector< shared_ptr< Array> >& inputArrays, shared_ptr<Query> query)
     {
         ArrayDesc const& inputSchema = inputArrays[0]->getArrayDesc();
-        Settings settings(inputSchema, _schema, query);
+        Settings settings(inputSchema, _schema, _parameters, false, query);
         shared_ptr<Array>& inputArray = inputArrays[0];
         inputArray = shared_ptr<Array>(new InputScannerArray(inputArray,settings, query));
         inputArray = sortArray(inputArray, query, settings);
