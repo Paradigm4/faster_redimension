@@ -33,7 +33,6 @@ iquery -anq "store(
   ),
   foo_big
  )"
-
  iquery -anq "store(sort(apply(foo_big, r, random()), r, 100000), foo_big_randomized)"
 fi
 
