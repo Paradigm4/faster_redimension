@@ -18,5 +18,8 @@ iquery -aq "faster_redimension(foo, <a:double, b:string>[c=0:*,10,0,x=0:*,10,0])
 iquery -aq "faster_redimension(foo, <b:string>[x=0:*,10,0])" >> $OUTFILE 2>&1
 iquery -aq "faster_redimension(foo, <b:string>[x=0:*,4,0])" >> $OUTFILE 2>&1
 
+iquery -aq "sort(unpack(faster_redimension(foo, <b:string>[c=0:*,4,0, synthetic=5:*,10,0]), i), c,synthetic)" >> $OUTFILE 2>&1
+iquery -aq "sort(unpack(faster_redimension(foo, <a:double, b:string>[synthetic=3:*,10,0, c=0:*,4,0]), i), c, synthetic)" >> $OUTFILE 2>&1
+
 diff $OUTFILE $EXPFILE
 

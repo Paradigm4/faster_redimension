@@ -136,7 +136,12 @@ public:
                     goto NextDim;
                 }
             }
-            throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "no extraneous dimensions allowed";
+            nNewDims ++;
+            outputDims.push_back(dstDim);
+            if(nNewDims >= 2)
+            {
+                throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "more than one synthetic dimension not allowed";
+            }
         NextDim:;
         }
         ArrayDesc outSchema(srcDesc.getName(),

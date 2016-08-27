@@ -27,6 +27,7 @@
 #define ARRAYIO_H_
 
 #include "FasterRedimensionSettings.h"
+#include <algorithm>
 #include <util/Network.h>
 #include "RedimensionTuple.h"
 
@@ -67,7 +68,6 @@ private:
     Value                                   _tupleValue;
     Value const*                            _tupleOutput;
 
-
 public:
     ArrayReader( shared_ptr<Array>& input, Settings const& settings):
         _input(input),
@@ -80,6 +80,11 @@ public:
         _cellCoords(_settings.getNumOutputDims()),
         _chunkCoords(_settings.getNumOutputDims())
     {
+        if(_settings.haveSynthetic())
+        {
+            _cellCoords[settings.getSyntheticId()] = settings.getSyntheticMin();
+            _chunkCoords[settings.getSyntheticId()] = settings.getSyntheticMin();
+        }
         for(size_t i =0; i<_numIterators; ++i)
         {
             if(_settings.getNumInputAttributesRead() ==0)
@@ -257,7 +262,15 @@ private:
     vector<shared_ptr<ChunkIterator> >  _chunkIterators;
     size_t                              _currentDstInstanceId;
     vector<Value>                       _outputValues;
+    bool const                          _haveSynthetic;
+    size_t                              _syntheticId;
+    bool const                          _syntheticLast;
+    Coordinate const                    _syntheticMin;
+    Coordinate const                    _syntheticMax;
+    Coordinate                          _currSynthetic;
     Value                               _boolTrue;
+    CoordinatesLess                     _coordComparator;
+    vector<Value>                       _redimTupleBuf;
 
 public:
     OutputWriter(Settings const& settings, shared_ptr<Query> const& query):
@@ -275,15 +288,67 @@ public:
         _outputPositionBuf       (_output->getArrayDesc().getDimensions().size(), 0),
         _arrayIterators       (_numAttributes+1, NULL),
         _chunkIterators       (_numAttributes+1, NULL),
-        _outputValues         (_settings.getNumOutputAttrs())
+        _outputValues         (_settings.getNumOutputAttrs()),
+        _haveSynthetic        (_settings.haveSynthetic()),
+        _syntheticId          (_settings.getSyntheticId()),
+        _syntheticLast        (_haveSynthetic && _syntheticId == _numTupleDimensions-1),
+        _syntheticMin         (_settings.getSyntheticMin()),
+        _syntheticMax         (_settings.getSyntheticMax()),
+        _currSynthetic        (_syntheticMin)
     {
         _boolTrue.setBool(true);
         for(size_t i =0; i<_numAttributes+1; ++i)
         {
             _arrayIterators[i] = _output->getIterator(i);
         }
+        if(!_syntheticLast)
+        {
+            _redimTupleBuf.reserve(1024*1024);
+        }
     }
 
+private:
+    void flushTuplesFromBuffer()
+    {
+        size_t const nTuples = _redimTupleBuf.size();
+        vector<Value*> redimTuplePtrBuf(nTuples);
+        redimTuplePtrBuf[0] = &_redimTupleBuf[0];
+        for(size_t i=1; i<nTuples;++i)
+        {
+            redimTuplePtrBuf[i] = redimTuplePtrBuf[i-1]+1;
+        }
+        RedimTupleComparator comparator;
+        std::sort(redimTuplePtrBuf.begin(), redimTuplePtrBuf.end(), comparator);
+        uint32_t dstInstanceId;
+        position_t cellPos;
+        Coordinates outputCellPos(_numTupleDimensions);
+        vector<Value> outputValues (_settings.getNumOutputAttrs());
+        for(size_t i=0; i<nTuples; ++i)
+        {
+            Value const* tuple = redimTuplePtrBuf[i];
+            RedimTuple::decomposeTuple(_settings.getNumOutputDims(),
+                                       _settings.getNumOutputAttrs(),
+                                       _settings.outputAttributeNullable(),
+                                       _settings.getOutputAttributeSizes(),
+                                       tuple,
+                                       dstInstanceId,
+                                       outputCellPos,
+                                       cellPos,
+                                       outputValues);
+            _settings.getOutputCellCoords(_outputChunkPosition, cellPos, outputCellPos);
+            for(size_t i=0; i<_numAttributes; ++i)
+            {
+                _chunkIterators[i]->setPosition(outputCellPos);
+                _chunkIterators[i]->writeItem(outputValues[i]);
+            }
+            _chunkIterators[_numAttributes]->setPosition(outputCellPos);
+            _chunkIterators[_numAttributes]->writeItem(_boolTrue);
+        }
+        _redimTupleBuf.clear();
+    }
+
+
+public:
     void writeTuple(Value const* tuple)
     {
         bool newChunk = false;
@@ -306,8 +371,46 @@ public:
         }
         else if(_outputChunkPositionBuf != _outputChunkPosition)
         {
+            if(_haveSynthetic && !_syntheticLast && _redimTupleBuf.size())
+            {
+                flushTuplesFromBuffer();
+            }
             _outputChunkPosition = _outputChunkPositionBuf;
             newChunk = true;
+        }
+        if(_outputPosition.size() == 0)
+        {
+            _outputPosition = _outputPositionBuf;
+        }
+        else if(_haveSynthetic)
+        {
+            bool newRow = false;
+            for(size_t i=0; i<_numTupleDimensions; ++i)
+            {
+                if(i == _syntheticId)
+                {
+                    continue;
+                }
+                if(_outputPositionBuf[i] != _outputPosition[i])
+                {
+                    newRow = true;
+                    break;
+                }
+            }
+            if(newRow)
+            {
+                _currSynthetic = _syntheticMin;
+                _outputPositionBuf[_syntheticId] = _currSynthetic;
+            }
+            else
+            {
+                _currSynthetic++;
+                if(_currSynthetic > _syntheticMax)
+                {
+                    throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "Synthetic exceeds output chunk size";
+                }
+                _outputPositionBuf[_syntheticId] = _currSynthetic;
+            }
         }
         else if(_outputPositionBuf == _outputPosition)
         {
@@ -325,18 +428,32 @@ public:
                 _chunkIterators[i] = _arrayIterators[i]->newChunk(_outputChunkPosition).getIterator(_query, ChunkIterator::SEQUENTIAL_WRITE | ChunkIterator::NO_EMPTY_CHECK );
             }
         }
-        for(size_t i=0; i<_numAttributes; ++i)
+        if(_haveSynthetic && !_syntheticLast)
         {
-            _chunkIterators[i]->setPosition(_outputPosition);
-            _chunkIterators[i]->writeItem(_outputValues[i]);
+            _redimTupleBuf.push_back(*tuple);
+            Value* bufTuple = &(_redimTupleBuf[_redimTupleBuf.size()-1]);
+            position_t cellPos = _settings.getOutputCellPos(_outputChunkPosition, _outputPosition);
+            RedimTuple::setTuplePosition(bufTuple, _numTupleDimensions, cellPos);
         }
-        _chunkIterators[_numAttributes]->setPosition(_outputPosition);
-        _chunkIterators[_numAttributes]->writeItem(_boolTrue);
+        else
+        {
+            for(size_t i=0; i<_numAttributes; ++i)
+            {
+                _chunkIterators[i]->setPosition(_outputPosition);
+                _chunkIterators[i]->writeItem(_outputValues[i]);
+            }
+            _chunkIterators[_numAttributes]->setPosition(_outputPosition);
+            _chunkIterators[_numAttributes]->writeItem(_boolTrue);
+        }
     }
 
     shared_ptr<Array> finalize()
     {
-        for(size_t i =0; i<_numAttributes+1; ++i)
+        if(_haveSynthetic && !_syntheticLast && _redimTupleBuf.size())
+        {
+            flushTuplesFromBuffer();
+        }
+        for(size_t  i =0; i<_numAttributes+1; ++i)
         {
             if(_chunkIterators[i].get())
             {

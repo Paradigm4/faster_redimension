@@ -82,6 +82,10 @@ private:
     bool                          _sortChunkSizeLimitBytesSet;
     size_t                        _sgChunkSizeLimitBytes;
     bool                          _sgChunkSizeLimitBytesSet;
+    bool                          _haveSynthetic;
+    size_t                        _syntheticId;
+    Coordinate                    _syntheticMin;
+    Coordinate                    _syntheticMax;
 
     static string paramToString(shared_ptr <OperatorParam> const& parameter, shared_ptr<Query>& query, bool logical)
     {
@@ -155,7 +159,11 @@ public:
         _estTupleSizeBytesSet(false),
         _sortedArrayChunkSizeSet(false),
         _sortChunkSizeLimitBytesSet(false),
-        _sgChunkSizeLimitBytesSet(false)
+        _sgChunkSizeLimitBytesSet(false),
+        _haveSynthetic(false),
+        _syntheticId(0),
+        _syntheticMin(0),
+        _syntheticMax(0)
     {
         string const estTupleSizeBytesHeader       = "est_tuple_size_bytes=";        //estimation on how big each tuple is (sort uses this to size the buffer to fit in memory)
         string const sortedChunkSizeHeader         = "sorted_array_chunk_size=";     //chunk size for the output of the sort routine
@@ -270,6 +278,38 @@ private:
             _outputAttributeSizes[i]= outputAttr.getSize();
             _outputAttributeNullable[i] = (outputAttr.getFlags() !=0);
         }
+        for(size_t i=0; i<_numOutputDims; ++i)
+        {
+            DimensionDesc const& outputDim = _outputSchema.getDimensions()[i];
+            bool found = false;
+            for(size_t j=0; j<_numInputAttrs && !found; ++j)
+            {
+                AttributeDesc const& inputAttr = _inputSchema.getAttributes(true)[j];
+                if (outputDim.hasNameAndAlias(inputAttr.getName()))
+                {
+                    found = true;
+                }
+            }
+            for(size_t j=0; j<_numInputDims && !found; ++j)
+            {
+                DimensionDesc const& inputDim = _inputSchema.getDimensions()[j];
+                if (inputDim.hasNameAndAlias(outputDim.getBaseName()))
+                {
+                    found = true;
+                }
+            }
+            if(!found)
+            {
+                if(_haveSynthetic)
+                {
+                    throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "internal inconsistency";
+                }
+                _haveSynthetic = true;
+                _syntheticId = i;
+                _syntheticMin = outputDim.getStartMin();
+                _syntheticMax = outputDim.getStartMin() + outputDim.getChunkInterval() - 1;
+            }
+        }
     }
 
     void computeChunkSizes()
@@ -322,7 +362,9 @@ private:
         {
             output<<_inputDimensionsRead[i]<<" -> "<<_inputDimensionDestinations[i]<<" ";
         }
-        output<<" est_tuple_size_bytes="<<_estTupleSizeBytes
+        output<<" synthetic "<<_haveSynthetic<<" id "<<_syntheticId
+              <<" synthetic_min "<<_syntheticMin<<" synthetic_max"<<_syntheticMax
+              <<" est_tuple_size_bytes="<<_estTupleSizeBytes
               <<" sorted_array_chunk_size="<<_sortedArrayChunkSize
               <<" sort_chunk_size_limit_bytes="<<_sortChunkSizeLimitBytes
               <<" sg_chunk_size_limit_bytes="<<_sgChunkSizeLimitBytes;
@@ -450,6 +492,26 @@ public:
             }
         }
         return result;
+    }
+
+    bool haveSynthetic() const
+    {
+        return _haveSynthetic;
+    }
+
+    size_t getSyntheticId() const
+    {
+        return _syntheticId;
+    }
+
+    Coordinate getSyntheticMin() const
+    {
+        return _syntheticMin;
+    }
+
+    Coordinate getSyntheticMax() const
+    {
+        return _syntheticMax;
     }
 
     ArrayDesc makePreSortSchema(shared_ptr<Query> const& query, bool includeApproximateTupleSize = false) const

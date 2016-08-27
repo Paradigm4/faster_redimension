@@ -126,6 +126,12 @@ public:
         return *iid;
     }
 
+    static void setTuplePosition(Value* redimTuple, uint8_t const nDims, position_t const position)
+    {
+        position_t* posPtr = reinterpret_cast<position_t*>( reinterpret_cast<char*>(redimTuple->data()) + sizeof(uint8_t) + sizeof(uint32_t) + nDims * sizeof(Coordinate));
+        *posPtr = position;
+    }
+
     static void decomposeTuple(uint8_t const nDims,
                                size_t const nAttrs,
                                vector<bool> const& attrNullable,
@@ -235,6 +241,14 @@ public:
         uint8_t const nDims = *nDimsL;
         size_t const comparableSize = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(Coordinate) * nDims + sizeof(position_t);
         return (memcmp(left->data(), right->data(), comparableSize) == 0);
+    }
+};
+
+struct RedimTupleComparator
+{
+    bool operator() (Value const* i, Value const* j)
+    {
+        return RedimTuple::redimTupleLess(i, j);
     }
 };
 
