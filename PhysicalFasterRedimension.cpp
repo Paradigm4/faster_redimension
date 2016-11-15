@@ -96,7 +96,7 @@ public:
 
     virtual int getMode() const                      { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getMode call"; }
     virtual bool setPosition(Coordinates const& pos) { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator setPosition call"; }
-    virtual void reset()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator reset call"; }
+    virtual void restart()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator restart call"; }
     ConstChunk const& getChunk()                     { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getChunk call"; }
     virtual std::shared_ptr<Query> getQuery()        { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array chunkIterator getQuery call"; }
 };
@@ -162,7 +162,7 @@ public:
     }
 
     virtual bool setPosition(Coordinates const& pos) { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array iterator setPosition call"; }
-    virtual void reset()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array iterator reset call"; }
+    virtual void restart()                             { throw SYSTEM_EXCEPTION(SCIDB_SE_INTERNAL, SCIDB_LE_ILLEGAL_OPERATION) << "illegal array iterator restart call"; }
 };
 
 class InputScannerArray : public Array

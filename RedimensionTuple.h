@@ -72,7 +72,7 @@ public:
                 tupleSize += values[i]->size();
             }
         }
-        redimTuple->setSize(tupleSize);
+        redimTuple->setSize<Value::IGNORE_DATA>(tupleSize);
         uint8_t* nDimsPtr = reinterpret_cast<uint8_t*>(redimTuple->data());
         *nDimsPtr = nDims;
         ++nDimsPtr;
@@ -171,7 +171,7 @@ public:
             }
             if(attrSizes[i]!=0) //fixed size
             {
-                values[i].setSize(attrSizes[i]);
+                values[i].setSize<Value::IGNORE_DATA>(attrSizes[i]);
                 memcpy(values[i].data(), valPtr, attrSizes[i]);
                 valPtr += attrSizes[i];
             }
@@ -179,7 +179,7 @@ public:
             {
                 uint32_t* sizePtr = reinterpret_cast<uint32_t*>(valPtr);
                 uint32_t const size = *sizePtr;
-                values[i].setSize(size);
+                values[i].setSize<Value::IGNORE_DATA>(size);
                 ++sizePtr;
                 valPtr = reinterpret_cast<char*>(sizePtr);
                 memcpy(values[i].data(), valPtr, size);
