@@ -26,10 +26,13 @@ Faster performance is achieved with a number of factors:
 2. different algorithm for merging partially-filled chunks from different instances, particularly advantageous when the array has many attributes
 3. when synthetics are used, a second whole-array sort is avoided
 
-Depending on the input and output array shapes, this operator may be over 6x faster than regular `redimension`. But some cases may not see a significant improvement.
+Depending on the input and output array shapes, this operator may be over 6x faster than regular `redimension`. The improvement will vary on a case-by-case basis. 
 
 # Restrictions
-`faster_redimension` does not support aggregates, overlaps and always errors out on collision; does not support the `, false` flag.
+`faster_redimension` does not support aggregates, overlaps and always errors out on cell collisions - does not support the `, false` flag that `redimension` has.
+
+# Installation
+Use https://github.com/paradigm4/dev_tools and remember to check out the branch that matches your SciDB version.
 
 # Future
 P4 Dev is investigating incorporating these changes into regular `redimension` in future releases. This prototype will remain available in the meantime.
