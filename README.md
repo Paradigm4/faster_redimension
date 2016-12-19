@@ -29,7 +29,7 @@ Faster performance is achieved with a number of factors:
 Depending on the input and output array shapes, this operator may be over 6x faster than regular `redimension`. The improvement will vary on a case-by-case basis. 
 
 # Restrictions
-`faster_redimension` does not support aggregates, overlaps and always errors out on cell collisions - does not support the `, false` flag that `redimension` has.
+`faster_redimension` does not support auto-chunking, aggregates, overlaps and always errors out on cell collisions - does not support the `, false` flag that `redimension` has.
 
 # Installation
 Use https://github.com/paradigm4/dev_tools and remember to check out the branch that matches your SciDB version.
